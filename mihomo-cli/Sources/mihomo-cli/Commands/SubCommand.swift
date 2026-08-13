@@ -74,9 +74,7 @@ struct SubCommand: AsyncParsableCommand {
             var yes = false
 
             func run() async throws {
-                // TODO: validate format/rules/params before persisting (§1.2.2);
-                // name-collision handling with numeric suffix per §1.2.3.
-                throw stub("sub add local")
+                try await SubscriptionService().addLocal(path: path, preferredName: name, yes: yes)
             }
         }
 
@@ -102,7 +100,7 @@ struct SubCommand: AsyncParsableCommand {
             }
 
             func run() async throws {
-                throw stub("sub add remote")
+                try await SubscriptionService().addRemote(url: url, interval: interval, preferredName: name, yes: yes)
             }
         }
     }
@@ -117,10 +115,7 @@ struct SubCommand: AsyncParsableCommand {
         var force = false
 
         func run() async throws {
-            // TODO: atomic switch workflow with rollback (§4.1.1), staged-failure
-            // reporting, and the mode-precedence note (§2.4) printed on success
-            // if the subscription's embedded mode differs from what's in effect.
-            throw stub("sub use")
+            try await SubscriptionService().use(name: name, force: force)
         }
     }
 
@@ -134,9 +129,7 @@ struct SubCommand: AsyncParsableCommand {
         var editor: String?
 
         func run() async throws {
-            // TODO: blocked entirely if `name` is active; re-validate after
-            // editor exits and flag ⚠ invalid in `sub list` rather than reverting.
-            throw stub("sub edit")
+            try await SubscriptionService().edit(name: name, customEditor: editor)
         }
     }
 
@@ -150,7 +143,7 @@ struct SubCommand: AsyncParsableCommand {
         var yes = false
 
         func run() async throws {
-            throw stub("sub rm") // TODO: blocked if active
+            try await SubscriptionService().remove(name: name, yes: yes)
         }
     }
 
@@ -161,9 +154,7 @@ struct SubCommand: AsyncParsableCommand {
         var name: String
 
         func run() async throws {
-            // TODO: remote-only — error if called on a local subscription.
-            // Fault-tolerant download (§4.1.4); failure leaves cached copy untouched.
-            throw stub("sub refresh")
+            try await SubscriptionService().refresh(name: name)
         }
     }
 
@@ -174,11 +165,7 @@ struct SubCommand: AsyncParsableCommand {
         var name: String
 
         func run() async throws {
-            throw stub("sub validate")
+            try await SubscriptionService().validate(name: name)
         }
     }
-}
-
-private func stub(_ command: String) -> CLIError {
-    CLIError(what: "not implemented", cause: "'\(command)' is a scaffold stub", exitCode: .permissionDenied)
 }

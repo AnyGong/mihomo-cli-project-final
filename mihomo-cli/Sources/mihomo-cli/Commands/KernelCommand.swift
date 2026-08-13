@@ -59,11 +59,7 @@ struct KernelCommand: AsyncParsableCommand {
         var yes = false
 
         func run() async throws {
-            // TODO: fetch latest stable metadata, compare to active version.
-            // If declined (no --yes, user says no): exit 0, informational message
-            // per spec (NOT an error state). If accepted: fetch + use as one
-            // atomic operation with combined rollback.
-            throw stub("kernel check")
+            try await KernelCheckService().check(yes: yes)
         }
     }
 
@@ -157,15 +153,25 @@ struct KernelCommand: AsyncParsableCommand {
                 )
             }
 
-            if !yes {
-                // TODO: real interactive confirmation prompt (readLine-based),
-                // once a shared Prompt helper exists. Confirmation UX is
-                // intentionally not duplicated ad hoc in every command.
-                throw stub("kernel rm (interactive confirmation not yet implemented — pass --yes)")
+            let result = try confirm("Remove kernel '\(version)'?", yes: yes)
+            guard result == .confirmed else {
+                print("Removal cancelled.")
+                return
             }
 
-            // TODO: also delete the binary file at record.binaryPath on disk;
-            // store removal alone doesn't free the download.
+            // Remove the binary from disk first, then the store record.
+            // A failure here (e.g. missing file) is non-fatal — the store
+            // record is still removed so the tool doesn't list a ghost entry.
+            let binaryURL = URL(fileURLWithPath: record.binaryPath)
+            let kernelDir = binaryURL.deletingLastPathComponent()
+            do {
+                // Remove the whole per-version directory (binary + any sidecar files).
+                try FileManager.default.removeItem(at: kernelDir)
+            } catch {
+                // Not fatal — warn and continue to store removal.
+                fputs("warning: could not delete '\(kernelDir.path)': \(error.localizedDescription)\n", stderr)
+            }
+
             try await MetadataStore.shared.removeKernel(version: version)
             print("Removed kernel '\(version)'.")
         }
@@ -178,13 +184,16 @@ struct KernelCommand: AsyncParsableCommand {
         var json = false
 
         func run() async throws {
-            // TODO: KernelClient.version() + process info (pid, uptime) +
-            // last integrity check result + daemon supervision status.
-            throw stub("kernel status")
+            let service = KernelStatusService()
+            let report = try await service.report()
+
+            if json {
+                print(try KernelStatusService.jsonOutput(from: report))
+            } else {
+                print(KernelStatusService.humanOutput(from: report))
+            }
         }
     }
 }
 
-private func stub(_ command: String) -> CLIError {
-    CLIError(what: "not implemented", cause: "'\(command)' is a scaffold stub", exitCode: .permissionDenied)
-}
+

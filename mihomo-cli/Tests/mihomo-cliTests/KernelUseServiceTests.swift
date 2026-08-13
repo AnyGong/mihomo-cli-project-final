@@ -230,7 +230,13 @@ private final class FakeConfigWriter: RuntimeConfigWriting {
         self.workDirectory = workDirectory
     }
 
-    func write(version: String, credentials: ControlAPICredentials, mixedPort: Int) throws -> RuntimeConfig {
+    func write(
+        version: String,
+        credentials: ControlAPICredentials,
+        mixedPort: Int,
+        subscriptionYAML: String? = nil,
+        modeOverride: String? = nil
+    ) throws -> RuntimeConfig {
         self.credentials = credentials
         return RuntimeConfig(configURL: configURL, workDirectory: workDirectory)
     }

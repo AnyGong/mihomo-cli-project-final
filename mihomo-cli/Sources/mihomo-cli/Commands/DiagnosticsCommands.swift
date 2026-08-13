@@ -15,9 +15,25 @@ struct LogCommand: AsyncParsableCommand {
     var json = false
 
     func run() async throws {
-        // TODO: read across rotated files transparently (§4.1.6 retention policy)
-        // when the requested range spans a rotation boundary.
-        throw stub("log")
+        let minLevel: LogLevel?
+        if let l = level {
+            guard let parsed = LogLevel(rawValue: l.lowercased()) else {
+                throw CLIError(
+                    what: "invalid log level",
+                    cause: "unknown log level '\(l)'",
+                    fix: "valid levels: info, warning, error",
+                    exitCode: .validationFailure
+                )
+            }
+            minLevel = parsed
+        } else {
+            minLevel = nil
+        }
+
+        let lines = try AppLogger.shared.queryLogs(minLevel: minLevel, json: json)
+        for line in lines {
+            print(line)
+        }
     }
 }
 
@@ -35,7 +51,10 @@ struct AuditCommand: AsyncParsableCommand {
     var json = false
 
     func run() async throws {
-        throw stub("audit") // TODO: read-only query, never mutates the trail
+        let lines = try AppLogger.shared.queryAudit(since: since, actionFilter: action, json: json)
+        for line in lines {
+            print(line)
+        }
     }
 }
 
@@ -47,11 +66,7 @@ struct DoctorCommand: AsyncParsableCommand {
     var json = false
 
     func run() async throws {
-        // TODO: kernel integrity, subscription validity, port availability,
-        // system-proxy consistency, Tun entitlement, daemon health, disk/log
-        // headroom. Never exits non-zero for warnings alone — only if a check
-        // can't run at all (e.g. kernel binary missing/zero-length on disk -> .sourceVerificationFailure).
-        throw stub("doctor")
+        try await DoctorService().run(json: json)
     }
 }
 
@@ -67,14 +82,6 @@ struct UninstallCommand: AsyncParsableCommand {
     var yes = false
 
     func run() async throws {
-        // TODO order: stop kernel (user-initiated) -> remove launchd agent ->
-        // revert system proxy -> tear down Tun interface -> (if --purge-data)
-        // remove downloaded binaries/subscriptions/logs. Continue past
-        // individual step failures; report each with its own status line.
-        throw stub("uninstall")
+        try await UninstallService().uninstall(purgeData: purgeData, yes: yes)
     }
-}
-
-private func stub(_ command: String) -> CLIError {
-    CLIError(what: "not implemented", cause: "'\(command)' is a scaffold stub", exitCode: .permissionDenied)
 }

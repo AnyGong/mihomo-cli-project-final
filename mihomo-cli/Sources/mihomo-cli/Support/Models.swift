@@ -97,6 +97,22 @@ struct RunningKernelState: Codable, Equatable {
     var stderrPath: String
 }
 
+/// Active network mode per design doc §2.1 and §6.3.
+enum ActiveNetworkMode: Codable, Equatable {
+    case none
+    case systemProxy(service: String, host: String, port: Int, since: Date)
+    case tun(interface: String, since: Date)
+    case proxyMode(port: Int, since: Date)
+}
+
+/// Last applied macOS system proxy settings, tracked to detect external modification.
+struct SystemProxySettings: Codable, Equatable {
+    var service: String
+    var host: String
+    var port: Int
+    var appliedAt: Date
+}
+
 /// Top-level container persisted as a single JSON document. Combining
 /// related records into one file (rather than one file per kernel/
 /// subscription) follows the storage guidance to batch data that's read
@@ -108,4 +124,45 @@ struct MetadataDocument: Codable {
     var controlAPI: ControlAPICredentials?
     var daemon: DaemonState = DaemonState()
     var runningKernel: RunningKernelState?
+    var networkMode: ActiveNetworkMode = .none
+    var lastAppliedSystemProxy: SystemProxySettings?
+
+    init(
+        kernels: [KernelRecord] = [],
+        subscriptions: [SubscriptionRecord] = [],
+        controlAPI: ControlAPICredentials? = nil,
+        daemon: DaemonState = DaemonState(),
+        runningKernel: RunningKernelState? = nil,
+        networkMode: ActiveNetworkMode = .none,
+        lastAppliedSystemProxy: SystemProxySettings? = nil
+    ) {
+        self.kernels = kernels
+        self.subscriptions = subscriptions
+        self.controlAPI = controlAPI
+        self.daemon = daemon
+        self.runningKernel = runningKernel
+        self.networkMode = networkMode
+        self.lastAppliedSystemProxy = lastAppliedSystemProxy
+    }
+
+    enum CodingKeys: CodingKey {
+        case kernels
+        case subscriptions
+        case controlAPI
+        case daemon
+        case runningKernel
+        case networkMode
+        case lastAppliedSystemProxy
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.kernels = try container.decodeIfPresent([KernelRecord].self, forKey: .kernels) ?? []
+        self.subscriptions = try container.decodeIfPresent([SubscriptionRecord].self, forKey: .subscriptions) ?? []
+        self.controlAPI = try container.decodeIfPresent(ControlAPICredentials.self, forKey: .controlAPI)
+        self.daemon = try container.decodeIfPresent(DaemonState.self, forKey: .daemon) ?? DaemonState()
+        self.runningKernel = try container.decodeIfPresent(RunningKernelState.self, forKey: .runningKernel)
+        self.networkMode = try container.decodeIfPresent(ActiveNetworkMode.self, forKey: .networkMode) ?? .none
+        self.lastAppliedSystemProxy = try container.decodeIfPresent(SystemProxySettings.self, forKey: .lastAppliedSystemProxy)
+    }
 }

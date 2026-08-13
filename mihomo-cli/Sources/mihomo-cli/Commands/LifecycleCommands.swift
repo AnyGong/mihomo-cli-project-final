@@ -9,9 +9,7 @@ struct StartCommand: AsyncParsableCommand {
     var version: String?
 
     func run() async throws {
-        // TODO: refuse if already running ("use 'mihomo restart' instead").
-        // Same integrity recheck + liveness check as `kernel use` (§4.1.3).
-        throw stub("start")
+        try await LifecycleService().start(version: version)
     }
 }
 
@@ -22,9 +20,7 @@ struct StopCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "stop", abstract: "Stop the running kernel.")
 
     func run() async throws {
-        // TODO: SIGTERM, wait, SIGKILL after timeout. Set a "user-initiated"
-        // flag/file the daemon checks before deciding to auto-restart.
-        throw stub("stop")
+        try await LifecycleService().stop()
     }
 }
 
@@ -33,13 +29,6 @@ struct RestartCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "restart", abstract: "Restart the running kernel.")
 
     func run() async throws {
-        // TODO: single lock hold across both steps; on liveness failure,
-        // attempt to bring the previous configuration back up rather than
-        // leaving the kernel stopped.
-        throw stub("restart")
+        try await LifecycleService().restart()
     }
-}
-
-private func stub(_ command: String) -> CLIError {
-    CLIError(what: "not implemented", cause: "'\(command)' is a scaffold stub", exitCode: .permissionDenied)
 }

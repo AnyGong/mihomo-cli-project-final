@@ -297,4 +297,23 @@ actor MetadataStore {
     func markKernelStartObserved() throws {
         try updateDaemonState { $0.lastStopWasUserInitiated = false }
     }
+
+    // MARK: - Network Mode
+
+    func networkMode() throws -> ActiveNetworkMode {
+        try load().networkMode
+    }
+
+    func setNetworkMode(_ mode: ActiveNetworkMode) throws {
+        try mutate { doc in doc.networkMode = mode }
+    }
+
+    func lastAppliedSystemProxy() throws -> SystemProxySettings? {
+        try load().lastAppliedSystemProxy
+    }
+
+    func setLastAppliedSystemProxy(_ settings: SystemProxySettings?) throws {
+        try mutate { doc in doc.lastAppliedSystemProxy = settings }
+    }
 }
+

@@ -276,3 +276,169 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" SWIFTPM_CACHE_PATH="$PWD/.bui
 Result: 40 XCTest tests, 0 failures.
 
 **Still pending in Layer 3:** `kernel check`, `kernel status`, destructive/manual interrupted-download resume, and forced rollback verification under a deliberately stuck or failed new process.
+
+## 22. Layer 3 complete — `kernel check`, `kernel status`, shared prompt helper, `kernel rm` disk deletion
+
+Layer 3 (`kernel` group) is now fully implemented.
+
+**What was built:**
+
+- `Support/ConfirmationPrompt.swift` — shared `confirm(_:yes:)` helper implementing `AI.md §3.12`'s non-interactive/non-TTY output policy in one place. `isatty(STDIN_FILENO)` check: if stdin is not a TTY and `--yes` was not passed, throws `CLIError(exitCode: .validationFailure)` with a clear `--yes` suggestion rather than blocking on `readLine()`. Interactive path prints the question + `[y/N]` and returns `.confirmed` on `y`/`Y`, `.declined` otherwise.
+
+- `Support/KernelCheckService.swift` — testable service encapsulating `kernel check` logic. Fetches latest stable release metadata via `KernelReleaseProviding` (no download), compares against the active kernel, calls the injected prompt, then on confirmation runs the combined atomic fetch+use sequence. Declining is always exit `0` (informational, not a failure).
+
+- `Support/KernelStatusService.swift` — testable service encapsulating `kernel status` output. Queries `MetadataStore` for `RunningKernelState`/`DaemonState`, calls `KernelClient.version()` live via injected client to determine responsiveness. Provides `humanOutput(from:)` (table format matching the spec's exact layout) and `jsonOutput(from:)` (structured JSON for `--json`).
+
+- `kernel rm` — replaced the confirmation stub with `ConfirmationPrompt.confirm(...)`. Also added binary directory deletion: after the store record is removed, the per-version kernel directory is deleted via `FileManager.removeItem(at:)`; a missing-or-already-deleted directory is a non-fatal warning, not an error, so the store record is always cleaned up.
+
+**Design choices:**
+
+- `KernelCheckService` injects fetch and use as `(String) async throws -> Void`/`KernelUseResult` closures rather than accepting the concrete `final class` services as instances — this mirrors the injection pattern used across the rest of the project (closure DI over subclassing) and avoids needing to open or subclass the `final` services.
+- `KernelStatusService.humanOutput` deliberately does not call the control API itself — that call is encapsulated in `report()` and the result is a plain `StatusReport` value type. This makes both the human and JSON formatters pure functions, keeping the display logic separately testable.
+- `kernel rm`'s directory removal targets the whole per-version directory (not just the binary) because `KernelInstaller` writes the binary into a dedicated subdirectory (`~/.mihomo-cli/kernels/<version>/mihomo`). Removing only the binary would leave an empty directory behind.
+
+**Testing:** full suite passed on 2026-08-14:
+
+```
+cd mihomo-cli
+CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" SWIFTPM_CACHE_PATH="$PWD/.build/swiftpm-cache" swift test --disable-sandbox
+```
+
+Result: **53 XCTest tests, 0 failures** (up from 40). New tests:
+- `KernelCheckServiceTests` (7 tests): already-at-latest, `--yes` fetches+switches, declined no-op, non-TTY throws validationFailure, no active kernel, no stable release error, fetch-fail prevents use.
+- `KernelStatusTests` (6 tests): no running kernel (human+JSON), running+responsive (human+JSON), running+unresponsive, uptime formatting.
+
+**Still pending (manual-only, Layer 3 verification checklist):**
+- Interrupted-download resume: `kernel fetch` with mid-download kill, confirm re-run resumes from where it stopped.
+- Forced rollback: `kernel use` with the new process SIGSTOPped mid-liveness-check — confirm timeout and rollback to previous version rather than hanging.
+
+## 23. Layer 4 complete — `sub` group & `SubscriptionValidator`
+
+Layer 4 (`sub` command group) is now fully implemented.
+
+**What was built:**
+
+- `Package.swift`: added `Yams` (v5.4.0) dependency for AST-based YAML parsing and line-numbered validation.
+- `Support/SubscriptionValidator.swift`: full multi-layer validation engine:
+  1. YAML syntax parsing with line numbers extracted from `YamlError` marks.
+  2. Structure & parameter types validation (`mode`, `proxies`, `proxy-groups`, `rule-providers`, `rules`).
+  3. Proxy type verification (`ss`, `vmess`, `vless`, `trojan`, `hysteria2`, `wireguard`, `tuic`, `snell`, etc.).
+  4. Proxy group type and member target validation against declared proxies, groups, and built-in targets (`DIRECT`, `REJECT`, `GLOBAL`, `COMPATIBLE`, `PASS`).
+  5. Rule semantic validation checking rule format, target policy resolution, and `RULE-SET` provider declarations.
+  6. Rule provider validation checking `type`, `behavior`, `path`, and `url` presence.
+  7. Formatted error messages matching the spec's exact style (`error: subscription rejected — X validation errors\n  line Y: ...`).
+- `Support/SubscriptionService.swift`: service implementing all `sub` operations:
+  - `addLocal`: file existence & format pre-flight validation, collision resolution (prompts or appends `-2`, `-3`), metadata persistence.
+  - `addRemote`: Range-resumable download, pre-flight validation, managed storage in `~/.mihomo-cli/subscriptions/<name>.yaml`, collision handling.
+  - `use`: atomic subscription switch with validation, runtime config overlay generation via `RuntimeConfigWriter`, kernel liveness verification, automatic rollback on failure, and mode precedence warning note comparison (§2.4).
+  - `edit`: active subscription guard (`exit 2`), interactive `$EDITOR` spawn, post-edit re-validation setting `isFlaggedInvalid = true` without reverting user edits.
+  - `remove`: active subscription guard (`exit 2`), confirmation prompt, managed file cleanup.
+  - `refresh`: remote-only guard (`exit 2` for local subs), fault-tolerant download, atomic update, and active kernel runtime config reload.
+  - `validate`: standalone dry-run validation with structured line-number reporting.
+- `Support/RuntimeConfigWriter.swift`: updated to merge active subscription YAML content into runtime config while overlaying manager-owned `external-controller`, `secret`, `mixed-port`, and `mode`.
+- `Commands/SubCommand.swift`: wired `add local`, `add remote`, `use`, `edit`, `rm`, `refresh`, and `validate` to `SubscriptionService`.
+
+**Testing:**
+
+- Added hand-written YAML test fixtures under `Tests/mihomo-cliTests/Fixtures/subscriptions/` (`valid_minimal.yaml`, `valid_full.yaml`, `invalid_syntax.yaml`, `invalid_proxy_type.yaml`, `invalid_group_reference.yaml`, `invalid_rule_provider.yaml`).
+- `SubscriptionValidatorTests.swift` (7 unit tests): valid fixtures, syntax error line numbers, proxy type line numbers, group reference line numbers, rule provider line numbers, and formatted error string checks.
+- `SubscriptionServiceTests.swift` (13 unit tests): `addLocal` success & rejection & collision resolution, `addRemote` success & interval bounds, `use` no-op & mode precedence note, `edit` active guard (exit 2), `remove` active guard & success, `refresh` local guard (exit 2) & remote success, and import safety test asserting user's source file bytes on disk are never mutated.
+- Full test suite passed on 2026-08-14: **73 XCTest tests, 0 failures** (up from 53).
+
+## 24. Layer 5 complete — `mode` group (`status`, `rule`, `global`, `direct`)
+
+Layer 5 (`mode` command group) is now fully implemented.
+
+**What was built:**
+
+- `Support/ModeService.swift`: testable service implementing:
+  - `status`: queries running kernel for effective mode via `KernelClient.getConfigs().mode`, cross-checks against the active subscription's embedded default mode (flagging `(matches)` or `(CLI override in effect)` per §2.4), and outputs human table or JSON.
+  - `switchMode`: acquires advisory lock, verifies running kernel (fails closed with `exit 2` if not running), prompts for confirmation on `global` and `direct` modes (unless `--yes`), applies runtime patch via `KernelClient.patchConfigs`, and validates with `KernelClient.livenessCheck` readback.
+- `Commands/ModeCommand.swift`: wired `Status`, `Rule`, `Global`, and `Direct` subcommands directly to `ModeService`.
+
+**Design choices:**
+
+- Never mutates the active subscription file on disk: mode changes are strictly runtime overlays through `PATCH /configs` (satisfying the fundamental design principle from §2.4).
+- Confirmation safety gates: `global` (forces all traffic through proxy, risking LAN/captive-portal issues) and `direct` (bypasses proxy for all traffic) prompt the user when run interactively, and fail with `exit 2` when declined.
+- Non-kernel guard: mutating commands fail immediately with `exit 2` if no kernel is running.
+
+**Testing:**
+
+- `ModeServiceTests.swift` (11 unit tests):
+  - `testStatus_noRunningKernel`
+  - `testStatus_matchingMode_humanOutput`
+  - `testStatus_overriddenMode_humanOutput`
+  - `testStatus_noActiveSubscription`
+  - `testStatus_jsonOutput`
+  - `testSwitchMode_noRunningKernel_throwsExit2`
+  - `testSwitchMode_rule_success`
+  - `testSwitchMode_global_yesFlag_skipsPromptAndPatches`
+  - `testSwitchMode_global_declined_throwsExit2AndNeverPatches`
+  - `testSwitchMode_direct_declined_throwsExit2AndNeverPatches`
+  - `testSwitchMode_livenessFailure_surfacesError`
+- Full test suite passed on 2026-08-14: **84 XCTest tests, 0 failures** (up from 73).
+
+## 25. Layer 6 complete — `net` group (`status`, `system-proxy`, `tun`, `proxy-mode`, `off`)
+
+Layer 6 (`net` command group) is now fully implemented.
+
+**What was built:**
+
+- `Support/Models.swift` & `Support/MetadataStore.swift`: added `ActiveNetworkMode` (`.none`, `.systemProxy`, `.tun`, `.proxyMode`) and `SystemProxySettings` with backward-compatible defensive decoding.
+- `Support/NetworkSetup.swift`: testable wrapper around macOS `/usr/sbin/networksetup` managing service enumeration, active IP link detection, and HTTP/HTTPS web proxy configurations.
+- `Support/PortInspector.swift`: testable wrapper around `/usr/sbin/lsof` (for TCP LISTEN port inspection and PID/command attribution) and `/sbin/ifconfig` (for active `utun*` interface collision detection).
+- `Support/NetService.swift`: testable service implementing:
+  - `status`: displays active mode, interface/port, elapsed since timestamp, and daemon supervision status in human-readable table or `--json`.
+  - `systemProxyOn`: auto-targets single active network services, prompts or enforces `--interface` on ambiguous multiple interfaces, warns before overwriting pre-existing foreign proxies unless `--yes`, and sets macOS web proxy.
+  - `systemProxyOff`: disables web proxy on the active service; warns if externally changed.
+  - `tunOn`: detects utun interface collision (exit 7), checks/prompts for privileged entitlement setup (exit 6 if declined), and enables Tun mode.
+  - `tunOff`: idempotent teardown of Tun mode.
+  - `proxyModeOn`: pre-checks port availability via `lsof` with process attribution (exit 7 on collision), binds proxy mode.
+  - `proxyModeOff`: idempotent teardown of proxy mode.
+  - `off`: convenience command deactivating whichever mode is active.
+  - **Mutual Exclusivity**: activating any network mode automatically tears down whichever mode was previously active.
+- `Commands/NetCommand.swift`: wired all subcommands (`Status`, `SystemProxy.On`, `SystemProxy.Off`, `Tun.On`, `Tun.Off`, `ProxyMode.On`, `ProxyMode.Off`, `Off`) to `NetService`.
+
+**Testing:**
+
+- `NetworkSetupTests.swift` (4 unit tests): service list parsing, active IP detection, webproxy output parsing, lsof output parsing.
+- `NetServiceTests.swift` (18 unit tests):
+  - Status display in none, system-proxy, tun, proxy-mode, and json formats.
+  - System proxy on: auto-selection, explicit interface, unknown interface (exit 7), foreign proxy collision prompt/decline (exit 2).
+  - System proxy off: cleanup and idempotent off.
+  - Tun on: utun conflict (exit 7), entitlement declined (exit 6), success.
+  - Tun off: idempotent off.
+  - Proxy mode on: port conflict with process attribution (exit 7), success.
+  - Mutual exclusivity: activating Tun mode automatically disables pre-existing system proxy.
+  - Convenience `net off` deactivation.
+- Full test suite passed on 2026-08-14: **106 XCTest tests, 0 failures** (up from 84).
+
+## 26. Layer 7 complete — `daemon`, Lifecycle, & Diagnostics
+
+Layer 7 (`daemon` command group, manual lifecycle `start`/`stop`/`restart`, `log`, `audit`, `doctor`, and `uninstall`) is now fully implemented.
+
+**What was built:**
+
+- `Support/LaunchdAgent.swift`: testable service managing `~/Library/LaunchAgents/com.mihomo-cli.agent.plist` generation, `launchctl bootstrap`/`bootout`, and `MetadataStore` supervision state tracking (`daemon install`, `daemon remove`, `daemon status`).
+- `Support/Logger.swift`: structured leveled logger (`info`, `warning`, `error`) supporting automatic size-based log rotation (5MB, 5 files) and immutable structured audit log engine (`audit.log`).
+- `Support/LifecycleService.swift`: manual lifecycle management implementing:
+  - `start`: integrity verification (exit 8 on missing/empty binary), already-running guard (exit 2), process spawn, control API liveness verification, and `markKernelStartObserved()`.
+  - `stop`: not-running guard (exit 2), `markKernelStopExpected()` flag setting to prevent auto-restart races, SIGTERM/SIGKILL signal handling.
+  - `restart`: atomic stop and start with configuration rollback on failure.
+- `Support/DoctorService.swift`: dry-run diagnostic utility checking active kernel binary presence (exit 8 if missing), subscription validity, port availability, system proxy consistency, Tun entitlement, daemon health, and disk headroom.
+- `Support/UninstallService.swift`: ordered, best-effort system teardown (stop kernel -> remove daemon -> revert proxy -> net off -> optional `--purge-data`).
+- `Commands/DaemonCommand.swift`, `Commands/LifecycleCommands.swift`, `Commands/DiagnosticsCommands.swift`: wired all subcommands to their respective services.
+
+**Testing:**
+
+- `LaunchdAgentTests.swift` (4 unit tests): plist XML generation, install/remove state mutations, idempotent install/remove, status output.
+- `LoggerTests.swift` (4 unit tests): leveled logging & level filtering, 5-file size rotation across boundaries, immutable audit log recording/filtering, relative since parsing.
+- `LifecycleServiceTests.swift` (5 unit tests): already running exit 2, no active kernel exit 3, missing binary exit 8, successful start with liveness verification, stop with user-initiated flag marking.
+- `DoctorServiceTests.swift` (4 unit tests): all checks passed table output, warnings summary reporting without failure, JSON output, missing binary exit 8.
+- `UninstallServiceTests.swift` (2 unit tests): prompt decline exit 2, full teardown with `--purge-data`.
+- Full test suite passed on 2026-08-14: **127 XCTest tests, 0 failures** (up from 106).
+
+
+
+
+

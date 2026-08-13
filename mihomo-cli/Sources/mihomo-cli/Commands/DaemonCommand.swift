@@ -18,10 +18,7 @@ struct DaemonCommand: AsyncParsableCommand {
         var yes = false
 
         func run() async throws {
-            // TODO: write ~/Library/LaunchAgents/com.mihomo-cli.agent.plist,
-            // `launchctl bootstrap`. Idempotent — report "already installed"
-            // rather than erroring if it exists.
-            throw stub("daemon install")
+            try await DaemonService().install(yes: yes)
         }
     }
 
@@ -32,9 +29,7 @@ struct DaemonCommand: AsyncParsableCommand {
         var yes = false
 
         func run() async throws {
-            // TODO: `launchctl bootout` + delete plist. Does NOT stop a running
-            // kernel — only removes supervision. Message must make this explicit.
-            throw stub("daemon remove")
+            try await DaemonService().remove(yes: yes)
         }
     }
 
@@ -45,12 +40,7 @@ struct DaemonCommand: AsyncParsableCommand {
         var json = false
 
         func run() async throws {
-            // TODO: installed?, agent running state, restart count + last reason.
-            throw stub("daemon status")
+            try await DaemonService().status(json: json)
         }
     }
-}
-
-private func stub(_ command: String) -> CLIError {
-    CLIError(what: "not implemented", cause: "'\(command)' is a scaffold stub", exitCode: .permissionDenied)
 }

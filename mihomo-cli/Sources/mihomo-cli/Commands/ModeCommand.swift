@@ -18,9 +18,7 @@ struct ModeCommand: AsyncParsableCommand {
         var json = false
 
         func run() async throws {
-            // TODO: KernelClient.getConfigs().mode vs. active subscription's
-            // embedded default; flag "CLI override in effect" on mismatch (§2.4).
-            throw stub("mode status")
+            try await ModeService().status(json: json)
         }
     }
 
@@ -28,7 +26,7 @@ struct ModeCommand: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "rule", abstract: "Route per the active subscription's rule list (default).")
 
         func run() async throws {
-            throw stub("mode rule") // TODO: guard no-kernel-running -> CLIError.noKernelRunning
+            try await ModeService().switchMode(to: "rule", yes: true)
         }
     }
 
@@ -39,8 +37,7 @@ struct ModeCommand: AsyncParsableCommand {
         var yes = false
 
         func run() async throws {
-            // TODO: confirmation prompt unless --yes (LAN/captive-portal warning).
-            throw stub("mode global")
+            try await ModeService().switchMode(to: "global", yes: yes)
         }
     }
 
@@ -51,11 +48,7 @@ struct ModeCommand: AsyncParsableCommand {
         var yes = false
 
         func run() async throws {
-            throw stub("mode direct")
+            try await ModeService().switchMode(to: "direct", yes: yes)
         }
     }
-}
-
-private func stub(_ command: String) -> CLIError {
-    CLIError(what: "not implemented", cause: "'\(command)' is a scaffold stub", exitCode: .permissionDenied)
 }

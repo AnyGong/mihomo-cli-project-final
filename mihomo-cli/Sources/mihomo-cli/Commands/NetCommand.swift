@@ -18,7 +18,7 @@ struct NetCommand: AsyncParsableCommand {
         var json = false
 
         func run() async throws {
-            throw stub("net status") // TODO: mode, interface/port, since-timestamp, daemon supervision
+            try await NetService().status(json: json)
         }
     }
 
@@ -39,13 +39,7 @@ struct NetCommand: AsyncParsableCommand {
             var yes = false
 
             func run() async throws {
-                // TODO: enumerate `networksetup -listallnetworkservices`, filter to
-                // active-link services, single-match auto-target or prompt on
-                // multiple (exit 1 non-interactively without --interface).
-                // Conflicting-proxy detection via `networksetup -getwebproxy`
-                // before overwrite. Liveness check via a real request through
-                // the new proxy before persisting (design doc §4.1.1).
-                throw stub("net system-proxy on")
+                try await NetService().systemProxyOn(interface: interface, yes: yes)
             }
         }
 
@@ -53,9 +47,7 @@ struct NetCommand: AsyncParsableCommand {
             static let configuration = CommandConfiguration(commandName: "off")
 
             func run() async throws {
-                // TODO: revert only settings this tool applied (tracked from `on`);
-                // warn if current OS state doesn't match what was last set.
-                throw stub("net system-proxy off")
+                try await NetService().systemProxyOff()
             }
         }
     }
@@ -74,12 +66,7 @@ struct NetCommand: AsyncParsableCommand {
             var yes = false
 
             func run() async throws {
-                // TODO: check entitlement status (§2.3); if absent, one-time
-                // authenticated setup step (exit .privilegeError if declined).
-                // Pre-detect utun conflicts / port conflicts (§4.1.3).
-                // Rollback on liveness failure must tear down any partially
-                // created interface — no orphaned utun devices.
-                throw stub("net tun on")
+                try await NetService().tunOn(yes: yes)
             }
         }
 
@@ -87,8 +74,7 @@ struct NetCommand: AsyncParsableCommand {
             static let configuration = CommandConfiguration(commandName: "off")
 
             func run() async throws {
-                // TODO: idempotent — exit 0 "nothing to do" if not active.
-                throw stub("net tun off")
+                try await NetService().tunOff()
             }
         }
     }
@@ -107,9 +93,7 @@ struct NetCommand: AsyncParsableCommand {
             var port: Int?
 
             func run() async throws {
-                // TODO: port pre-check with process attribution via `lsof -i :<port>`
-                // where permissions allow (exit .portUnavailable on conflict).
-                throw stub("net proxy-mode on")
+                try await NetService().proxyModeOn(port: port)
             }
         }
 
@@ -117,7 +101,7 @@ struct NetCommand: AsyncParsableCommand {
             static let configuration = CommandConfiguration(commandName: "off")
 
             func run() async throws {
-                throw stub("net proxy-mode off")
+                try await NetService().proxyModeOff()
             }
         }
     }
@@ -126,12 +110,7 @@ struct NetCommand: AsyncParsableCommand {
         static let configuration = CommandConfiguration(commandName: "off", abstract: "Deactivate whichever network mode is currently active.")
 
         func run() async throws {
-            // TODO: idempotent convenience wrapper — no-op with exit 0 if none active.
-            throw stub("net off")
+            try await NetService().off()
         }
     }
-}
-
-private func stub(_ command: String) -> CLIError {
-    CLIError(what: "not implemented", cause: "'\(command)' is a scaffold stub", exitCode: .permissionDenied)
 }

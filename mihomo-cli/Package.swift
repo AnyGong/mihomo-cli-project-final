@@ -19,12 +19,15 @@ let package = Package(
     dependencies: [
         // Command parsing / subcommand tree
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
+        // YAML parser for subscription configuration validation
+        .package(url: "https://github.com/jpsim/Yams.git", from: "5.0.0"),
     ],
     targets: [
         .executableTarget(
             name: "mihomo-cli",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Yams", package: "Yams"),
             ],
             path: "Sources/mihomo-cli"
         ),
