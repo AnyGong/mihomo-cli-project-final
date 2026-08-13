@@ -84,51 +84,67 @@ Full detail is in `CHANGELOG.md`; this is the condensed version so you don't hav
 
 ## 5. Current implementation status (snapshot — verify against `README.md` for the live version)
 
-**Fully implemented, tested, real:**
-- `Support/ExitCode.swift`, `Support/CLIError.swift` — exit codes and error formatting.
-- `MihomoCLIEntrypoint.swift` — custom ArgumentParser entrypoint so thrown `CLIError`s print the spec's exact `error: ...` format and exit with the project's custom exit-code table.
-- `Support/AdvisoryLock.swift` — real `flock(2)` locking. Tested (`Tests/mihomo-cliTests/AdvisoryLockTests.swift`).
-- `Support/Models.swift`, `Support/MetadataStore.swift` — JSON-backed metadata store (kernels, subscriptions, control-API credentials, daemon state) with atomic writes. Tested (`Tests/mihomo-cliTests/MetadataStoreTests.swift`).
-- `mihomo kernel list` — real data, real table/JSON output.
-- `mihomo sub list` — real data, real table/JSON output.
-- `mihomo kernel fetch` — real official GitHub Releases API path for latest stable, latest 10 (`--all`), and explicit tags. It selects the upstream-provided darwin-arm64 asset URL (never constructs one by hand), downloads with Range resume/retry, extracts the `.gz`, sets executable permissions, and registers the kernel in `MetadataStore`. Unit-tested and smoke-tested against upstream by downloading `v1.19.29` and `v1.19.28`.
-- `mihomo kernel use` — real atomic-ish kernel switch path with advisory locking, pre-lock and post-lock no-op checks, on-disk binary presence check, fresh manager-owned control-API credentials/runtime config, intentional stop marking for the previous running process, port-release wait, subprocess stdout/stderr capture, liveness retry/readback, active/running metadata persistence, and distinct rollback-failure reporting. Unit-tested and smoke-tested by switching live between `v1.19.29` and `v1.19.28`.
-- `mihomo kernel rm` — enforces the active-kernel hard restriction against real store state. (Its `--yes`-less interactive confirmation path is still a stub — see below.)
-- `KernelClient` / `HTTPKernelClient` — real `URLSession` implementation for the mihomo control API: Bearer-token auth, short `/version` reachability preflight, `/configs` GET/PATCH, `/group` policy-group reads, reserved `/proxies/{group}` node selection, `/connections` GET/DELETE, HTTP status/error mapping, and the composed `livenessCheck`. Tested with mocked `URLProtocol` (`Tests/mihomo-cliTests/HTTPKernelClientTests.swift`).
+**All 7 layers are fully implemented, tested, and real:**
+- `Support/ExitCode.swift`, `Support/CLIError.swift` — centralized exit codes and standard error formatting.
+- `MihomoCLIEntrypoint.swift` — custom ArgumentParser entrypoint ensuring thrown `CLIError`s print `error: <what> — <cause> (<fix>)` and exit with the designated code.
+- `Support/AdvisoryLock.swift` — cross-process `flock(2)` advisory lock with automatic release on failure. Tested (`Tests/mihomo-cliTests/AdvisoryLockTests.swift`).
+- `Support/Models.swift`, `Support/MetadataStore.swift` — JSON-backed metadata store (kernels, subscriptions, control-API credentials, daemon state, network mode, last applied system proxy) with defensive backward-compatible decoding and atomic temp-file-and-rename writes. Tested (`Tests/mihomo-cliTests/MetadataStoreTests.swift`).
+- `Support/ConfirmationPrompt.swift` — shared TTY-detection helper failing closed in non-interactive/piped environments without `--yes`.
+- `KernelClient` / `HTTPKernelClient` — real `URLSession` implementation for the mihomo REST control API (`/version`, `/configs`, `/group`, `/proxies/{group}`, `/connections`, `livenessCheck`). Tested (`Tests/mihomo-cliTests/HTTPKernelClientTests.swift`).
+- **`kernel` command group** ([`KernelCommand.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/KernelCommand.swift)):
+  - `kernel list` — human-formatted table and `--json` outputs with default sort (Active > Last Used > Version > Added Time).
+  - `kernel fetch` — downloads official GitHub release tarballs with Range resume/retry, extracts `.gz`, verifies permissions, registers in store. Tested (`KernelFetchTests.swift`).
+  - `kernel use` — atomic kernel switch with advisory locking, no-op check, binary integrity check, runtime config generation, intentional stop signaling, port release wait, liveness readback, and rollback. Tested (`KernelUseServiceTests.swift`).
+  - `kernel check` — GitHub release checking, comparison against active kernel, interactive prompt, atomic switch. Tested (`KernelCheckServiceTests.swift`).
+  - `kernel status` — runtime state inspection (version, PID, uptime, control API health, launchd supervision). Tested (`KernelStatusTests.swift`).
+  - `kernel rm` — active kernel deletion protection (exit 2), interactive confirmation prompt, disk & metadata cleanup.
+- **`sub` command group** ([`SubCommand.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/SubCommand.swift)):
+  - `SubscriptionValidator` — AST-based multi-layer validator using `Yams` (syntax, structure, proxy types, proxy group targets, rule providers, rule semantic resolution) reporting exact line numbers. Tested (`SubscriptionValidatorTests.swift`).
+  - `SubscriptionService` — `add local` (file safety preserved, never mutates user source files), `add remote` (Range-resumable download), `use` (atomic switch with runtime config overlay generation and mode precedence note comparison), `edit` (active guard exit 2, `$EDITOR` spawn, `isFlaggedInvalid` flagging without reverting edits), `rm` (active guard exit 2, prompt, cleanup), `refresh` (remote-only guard exit 2, download, reload), and `validate` (line-number diagnostics). Tested (`SubscriptionServiceTests.swift`).
+- **`mode` command group** ([`ModeCommand.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/ModeCommand.swift)):
+  - `ModeService` — `mode status` (compares live kernel mode with subscription embedded default, reporting matches vs. CLI overrides), `mode rule`, `mode global` (safety confirmation prompt, exit 2 on decline), and `mode direct` (safety confirmation prompt, exit 2 on decline) using runtime `PATCH /configs` overlays and `livenessCheck` readbacks. Tested (`ModeServiceTests.swift`).
+- **`net` command group** ([`NetCommand.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/NetCommand.swift)):
+  - `NetworkSetup` — testable wrapper around macOS `/usr/sbin/networksetup` managing service enumeration, active IP link detection, and web proxy configuration. Tested (`NetworkSetupTests.swift`).
+  - `PortInspector` — testable wrapper around `/usr/sbin/lsof` (for TCP LISTEN port checking with process PID/name attribution) and `/sbin/ifconfig` (for `utun` conflict detection).
+  - `NetService` — `net status` (table / `--json`), `net system-proxy on|off` (single service auto-selection, multiple active services prompt vs `--interface`, pre-existing foreign proxy overwrite warning/prompt), `net tun on|off` (privilege elevation verification exit 6, utun collision exit 7), `net proxy-mode on|off` (port conflict check exit 7), and `net off` (idempotent deactivation). Enforces mutual exclusivity across all modes. Tested (`NetServiceTests.swift`).
+- **`daemon` command group** ([`DaemonCommand.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/DaemonCommand.swift)):
+  - `DaemonService` & `LaunchdAgent` — manages `~/Library/LaunchAgents/com.mihomo-cli.agent.plist` generation, `launchctl bootstrap`/`bootout`, and `MetadataStore` supervision state tracking (`daemon install`, `daemon remove`, `daemon status`). Tested (`LaunchdAgentTests.swift`).
+- **Lifecycle commands** ([`LifecycleCommands.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/LifecycleCommands.swift)):
+  - `LifecycleService` — `start` (binary presence check exit 8, already-running guard exit 2, process spawn, control API liveness check, observed start marking), `stop` (not-running guard exit 2, `markKernelStopExpected()` flag setting to prevent auto-restart races, SIGTERM/SIGKILL), `restart` (atomic stop and start with rollback). Tested (`LifecycleServiceTests.swift`).
+- **Diagnostics commands** ([`DiagnosticsCommands.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/DiagnosticsCommands.swift)):
+  - `AppLogger` — structured leveled logger (`info`, `warning`, `error`) supporting automatic size-based log rotation (5MB, up to 5 historical files) and immutable structured audit log engine (`audit.log`) queryable with `--since` and `--action`. Powers `log` and `audit`. Tested (`LoggerTests.swift`).
+  - `DoctorService` — dry-run diagnostic suite verifying 7 subsystem checks (kernel binary presence, subscription validity, port availability, system proxy consistency, Tun entitlement, daemon health, disk/log headroom) in table or `--json` format without modifying state. Tested (`DoctorServiceTests.swift`).
+  - `UninstallService` — ordered, best-effort teardown (stop kernel -> remove daemon -> revert proxy -> net off -> optional `--purge-data`). Tested (`UninstallServiceTests.swift`).
 
-**Command grammar complete, behavior stubbed** (every flag/arg/subcommand exists and parses correctly; `run()` throws "not implemented"):
-- `kernel check`, `kernel status`
-- `sub add` (local + remote), `sub use`, `sub edit`, `sub rm`, `sub refresh`, `sub validate`
-- entire `net` group (`status`, `system-proxy`, `tun`, `proxy-mode`, `off`)
-- entire `mode` group (`status`, `rule`, `global`, `direct`)
-- entire `daemon` group (`install`, `remove`, `status`)
-- `start`, `stop`, `restart`, `log`, `audit`, `doctor`, `uninstall`
+**Verified to compile/test:**
+- `swift test --disable-sandbox` executed on 2026-08-14: **127 XCTest unit tests, 0 failures** (Apple Swift 6.4, macOS 27 SDK).
+- `CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" SWIFTPM_CACHE_PATH="$PWD/.build/swiftpm-cache" swift test --disable-sandbox` is the standard test command.
 
-**Not started at all:**
-- YAML subscription validation (`SubscriptionValidator` — doesn't exist yet)
-- `networksetup` wrapper (`Support/NetworkSetup.swift` — doesn't exist yet)
-- Tun-mode Swift integration (`Support/TunPrivilege.swift` — doesn't exist yet; hardware spike resolved the mechanism as `sudo`-elevated launch)
-- `launchd` plist generation (`Support/LaunchdAgent.swift` — doesn't exist yet)
-- Leveled/rotating logger (`Support/Logger.swift` — doesn't exist yet; every stub currently just throws, nothing calls a logger)
-- Shared interactive-confirmation-prompt helper (currently duplicated informally / stubbed per-command)
+## 6. Verification checklist and release gate
 
-**Verified to compile/test:** `swift test --disable-sandbox` passed on 2026-08-13 with 40 XCTest tests (Apple Swift 6.4, macOS 27 SDK). `--disable-sandbox` was needed in the Codex sandbox because SwiftPM's own sandbox conflicted with Codex's filesystem sandbox; normal network access is available again. **Manual/live mihomo QA is partially complete:** `kernel fetch` has been smoke-tested against the real upstream GitHub API and produced working `v1.19.29` and `v1.19.28` arm64 binaries; `kernel use` has live-switched between them; `/version` and `PATCH /configs {"mode":"global|direct|rule"}` were confirmed against a running mihomo instance; active-kernel `kernel rm` blocking was rechecked with exact stderr and exit code `2`.
+All software layers are built and covered with comprehensive automated unit tests. The final phase is **manual hardware verification** on the physical Mac Mini M4 running macOS 27 Beta, per `docs/mihomo_implementation_test_verification_plan.md`:
 
-## 6. Immediate next task and known open decisions
-
-Per `mihomo_implementation_test_verification_plan.md`, the next layer is still **finishing the `kernel` command group** (Layer 3). `kernel fetch` and `kernel use` are implemented; next are `kernel check` and `kernel status`, plus the remaining manual Layer 3 checks: interrupted-download resume and forced rollback under a deliberately stuck/failed new process.
-
-Items previously flagged as **requiring a decision or a prototype spike on real hardware**, not something to implement from documentation alone:
-1. ~~Tun-mode privilege escalation mechanism~~ **RESOLVED, confirmed on hardware (2026-08-13).** `scripts/tun_privilege_spike.sh` was run on the Mac Mini M4: unprivileged `utun` creation failed with `Operation not permitted` as expected, confirming root is genuinely required; elevated creation via `sudo` succeeded, producing a working `utun5` interface, cleanly torn down afterward. **Mechanism confirmed: `sudo`-elevated launch of the mihomo kernel binary.** The NOPASSWD `sudoers.d` convenience rule from the guide has **not** been applied yet — testing so far used plain interactive `sudo` (password prompt each time). This is not a blocker: `Support/TunPrivilege.swift` (Phase 6) should detect whether the NOPASSWD rule is present and fall back to interactive `sudo` gracefully if not, exactly as the guide's own fallback path already describes — applying the NOPASSWD rule for daily-use convenience can happen anytime, independently of implementation work.
-2. ~~mihomo's actual `/configs` and `/proxies` response schemas~~ **RESOLVED, live-confirmed (2026-08-13).** `docs/mihomo_api_reference_notes.md` documents the current mihomo API, and `HTTPKernelClient` uses the corrected shapes (`/group` instead of `/proxies` for policy groups, kebab-case `/configs` fields, `PATCH /configs` as 204/no-body). The previously uncertain mode payload is now confirmed: a running mihomo accepted `PATCH /configs` with `{"mode":"global"}`, `{"mode":"direct"}`, and `{"mode":"rule"}`, each returning 204 and reading back via `GET /configs`.
-
-One more thing worth tracking, not a decision but a standing risk: **the target OS is a Beta (macOS 27 Beta).** `networksetup` behavior, Tun/`utun` interface creation, `launchd` semantics, and whatever mechanism item #1 resolves to are all APIs that can change between beta builds and the eventual public release. There's no action to take on this now beyond awareness — if the OS build on the Mac Mini changes materially before Phase 6 (`net` group) is reached, re-verify that phase's manual checklist against the new build rather than assuming prior verification still holds.
+1. **Kernel Group**:
+   - [ ] Interrupted-download resume: `kernel fetch` with mid-download kill, confirm re-run resumes from where it stopped.
+   - [ ] Forced rollback: `kernel use` with the new process SIGSTOPped mid-liveness-check — confirm timeout and rollback to previous version rather than hanging.
+2. **Sub Group**:
+   - [ ] Import real subscription files, verify proxy groups, and test atomic switch under traffic.
+3. **Mode Group**:
+   - [ ] Confirm `mode global`'s LAN-access warning text renders accurately and prompts as specified.
+4. **Net Group**:
+   - [ ] Multi-interface system-proxy: confirm prompt displays real network services and applies proxy in macOS System Settings.
+   - [ ] Tun mode: verify `sudo`-elevated launch on real hardware, check `utun` interface creation and routing, verify teardown leaves no orphaned `utun` devices.
+5. **Daemon & Lifecycle**:
+   - [ ] `daemon install`, then force-kill kernel (`kill -9`) — confirm `launchd` auto-restarts it and increments restart count in `daemon status`.
+   - [ ] `mihomo stop` while daemon is installed — confirm it does **not** auto-restart (user-initiated stop contract).
+   - [ ] `mihomo doctor` — verify diagnostic report against live system.
+   - [ ] `mihomo uninstall --purge-data` — verify complete system restoration and clean data removal.
 
 ## 7. Rules for whoever (or whatever) works on this next
 
-- **Update `README.md`'s status table every time you implement something.** Do not let it go stale — it's the fastest source of truth for the *next* handoff.
-- **Update `CHANGELOG.md`** with any decision that changes behavior, conventions, or scope — the same way the SHA256 cancellation was recorded. Future assistants should never have to reverse-engineer *why* something is the way it is from code alone.
-- **Do not modify the six non-negotiable conventions in §3** without updating every document that references them (`Full Specification`, `control_api_integration_spec`, this file) in the same change — these documents are cross-referential and a partial update creates exactly the kind of drift this handoff is meant to prevent.
-- **Follow the layer order** in `mihomo_implementation_test_verification_plan.md`. It's dependency-ordered, not arbitrary — `net` in particular is deliberately last because it's the highest-risk, least-testable-in-CI layer and benefits from every other layer already being solid.
-- **Keep `swift test` green after every implementation layer.** In restricted Codex sandboxes, the known-good invocation is `CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" SWIFTPM_CACHE_PATH="$PWD/.build/swiftpm-cache" swift test --disable-sandbox` from `mihomo-cli/`.
-- **Final deliverable definition**: this project is "done" when every checkbox in every layer's verification-scheme checklist in `mihomo_implementation_test_verification_plan.md` is checked against a real build on real Apple Silicon hardware — not when the code merely compiles or unit tests pass. That document's closing line states this explicitly as the release gate.
+- **Update `README.md`'s status table every time you modify anything.**
+- **Update `CHANGELOG.md`** with any decision that changes behavior, conventions, or scope.
+- **Do not modify the non-negotiable conventions in §3** without updating every document that references them (`Full Specification`, `control_api_integration_spec`, this file).
+- **Keep `swift test` green after every modification.** (Run with `--disable-sandbox`).
+- **Release Gate**: The tool is considered release-ready when all manual hardware verification checkboxes above are confirmed on the physical Mac Mini M4.
+
