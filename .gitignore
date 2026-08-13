@@ -1,0 +1,18 @@
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.temp
+.DS_Store
+
+/mihomo-cli/.build/
+/mihomo-cli/.swiftpm/
+/mihomo-cli/*.xcodeproj
+/mihomo-cli/.DS_Store
