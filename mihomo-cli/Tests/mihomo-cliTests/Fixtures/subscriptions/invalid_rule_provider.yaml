@@ -1,0 +1,19 @@
+mode: rule
+proxies:
+  - name: "Node-1"
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Node-1"
+rule-providers:
+  ads:
+    type: http
+    behavior: domain
+rules:
+  - RULE-SET,ads,REJECT
+  - RULE-SET,dangling_ruleset,REJECT
+  - MATCH,PROXY

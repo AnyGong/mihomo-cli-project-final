@@ -1,0 +1,49 @@
+mixed-port: 7890
+mode: rule
+log-level: info
+allow-lan: false
+
+proxies:
+  - name: "HK-01"
+    type: vmess
+    server: 1.1.1.1
+    port: 443
+    uuid: 12345678-1234-1234-1234-123456789abc
+    alterId: 0
+    cipher: auto
+  - name: "US-01"
+    type: hysteria2
+    server: 2.2.2.2
+    port: 443
+    password: pass
+
+proxy-groups:
+  - name: "Auto"
+    type: url-test
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+    proxies:
+      - "HK-01"
+      - "US-01"
+  - name: "Proxy"
+    type: select
+    proxies:
+      - "Auto"
+      - "HK-01"
+      - "US-01"
+      - DIRECT
+
+rule-providers:
+  reject_list:
+    type: http
+    behavior: domain
+    url: "https://example.com/reject.txt"
+    path: "./ruleset/reject.yaml"
+    interval: 86400
+
+rules:
+  - RULE-SET,reject_list,REJECT
+  - DOMAIN-SUFFIX,google.com,Proxy
+  - DOMAIN-KEYWORD,github,Proxy
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy

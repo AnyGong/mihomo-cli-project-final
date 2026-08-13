@@ -1,0 +1,16 @@
+mode: rule
+proxies:
+  - name: "Node-1"
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-128-gcm
+    password: test
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Node-1"
+      - DIRECT
+rules:
+  - MATCH,PROXY

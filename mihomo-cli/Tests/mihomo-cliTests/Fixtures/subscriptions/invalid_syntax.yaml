@@ -1,0 +1,8 @@
+mode: rule
+proxies:
+  - name: "Node-1"
+    type: ss
+    server: 1.2.3.4
+    port: [unclosed list
+proxy-groups:
+  - name: "PROXY"

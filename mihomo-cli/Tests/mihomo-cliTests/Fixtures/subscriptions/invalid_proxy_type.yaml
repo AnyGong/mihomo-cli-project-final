@@ -1,0 +1,13 @@
+mode: rule
+proxies:
+  - name: "Node-1"
+    type: vmess2
+    server: 1.2.3.4
+    port: 8388
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Node-1"
+rules:
+  - MATCH,PROXY

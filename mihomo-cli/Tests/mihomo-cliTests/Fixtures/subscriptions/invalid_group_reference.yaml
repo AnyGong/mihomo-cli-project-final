@@ -1,0 +1,13 @@
+mode: rule
+proxies:
+  - name: "Node-1"
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Node-99"
+rules:
+  - MATCH,NON_EXISTENT_GROUP
