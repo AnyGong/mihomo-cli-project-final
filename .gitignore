@@ -11,6 +11,7 @@
 *.swp
 .temp
 .DS_Store
+logs
 
 /mihomo-cli/.build/
 /mihomo-cli/.swiftpm/

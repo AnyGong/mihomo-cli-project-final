@@ -31,8 +31,8 @@ final class LifecycleServiceTests: XCTestCase {
     func testStart_alreadyRunning_throwsExit2() async throws {
         let running = RunningKernelState(version: "1.19.10", pid: 4000, startedAt: Date(), controlPort: 9090, mixedPort: 7890, configPath: "", stdoutPath: "", stderrPath: "")
         let service = LifecycleService(
-            logger: testLogger,
-            runningKernel: { running }
+            runningKernel: { running },
+            logger: testLogger
         )
 
         do {
@@ -46,9 +46,9 @@ final class LifecycleServiceTests: XCTestCase {
 
     func testStart_noActiveKernel_throwsExit3() async throws {
         let service = LifecycleService(
-            logger: testLogger,
             runningKernel: { nil },
-            activeKernel: { nil }
+            activeKernel: { nil },
+            logger: testLogger
         )
 
         do {
@@ -62,9 +62,9 @@ final class LifecycleServiceTests: XCTestCase {
     func testStart_missingBinary_throwsExit8() async throws {
         let record = KernelRecord(version: "1.19.10", binaryPath: "/nonexistent/path/mihomo", addedAt: Date(), isActive: true)
         let service = LifecycleService(
-            logger: testLogger,
             runningKernel: { nil },
-            activeKernel: { record }
+            activeKernel: { record },
+            logger: testLogger
         )
 
         do {
@@ -82,7 +82,6 @@ final class LifecycleServiceTests: XCTestCase {
         var printed: [String] = []
 
         let service = LifecycleService(
-            logger: testLogger,
             runningKernel: { savedRunning },
             setRunningKernel: { savedRunning = $0 },
             activeKernel: { record },
@@ -91,6 +90,7 @@ final class LifecycleServiceTests: XCTestCase {
             clientFactory: { _ in FakeLifecycleKernelClient(result: .healthy) },
             configWriter: FakeLifecycleConfigWriter(),
             processSpawner: { _, _, _, _, _ in 5555 },
+            logger: testLogger,
             printLine: { printed.append($0) }
         )
 
@@ -107,8 +107,8 @@ final class LifecycleServiceTests: XCTestCase {
 
     func testStop_notRunning_throwsExit2() async throws {
         let service = LifecycleService(
-            logger: testLogger,
-            runningKernel: { nil }
+            runningKernel: { nil },
+            logger: testLogger
         )
 
         do {
@@ -127,7 +127,6 @@ final class LifecycleServiceTests: XCTestCase {
         var printed: [String] = []
 
         let service = LifecycleService(
-            logger: testLogger,
             runningKernel: { running },
             setRunningKernel: { running = $0 },
             markKernelStopExpected: { stopExpected = true },
@@ -136,6 +135,7 @@ final class LifecycleServiceTests: XCTestCase {
                 return 0
             },
             isProcessRunning: { _ in false }, // simulate immediate graceful termination after SIGTERM
+            logger: testLogger,
             printLine: { printed.append($0) }
         )
 
@@ -152,7 +152,6 @@ final class LifecycleServiceTests: XCTestCase {
         var elevatedFlags: [Bool] = []
 
         let service = LifecycleService(
-            logger: testLogger,
             runningKernel: { running },
             setRunningKernel: { running = $0 },
             markKernelStopExpected: {},
@@ -160,7 +159,8 @@ final class LifecycleServiceTests: XCTestCase {
                 elevatedFlags.append(elevated)
                 return 0
             },
-            isProcessRunning: { _ in false }
+            isProcessRunning: { _ in false },
+            logger: testLogger
         )
 
         try await service.stop()
@@ -170,8 +170,8 @@ final class LifecycleServiceTests: XCTestCase {
 
     func testSetTunElevation_noRunningKernel_throws() async throws {
         let service = LifecycleService(
-            logger: testLogger,
-            runningKernel: { nil }
+            runningKernel: { nil },
+            logger: testLogger
         )
 
         do {
@@ -187,12 +187,12 @@ final class LifecycleServiceTests: XCTestCase {
         var spawnCount = 0
 
         let service = LifecycleService(
-            logger: testLogger,
             runningKernel: { running },
             processSpawner: { _, _, _, _, _ in
                 spawnCount += 1
                 return 9999
-            }
+            },
+            logger: testLogger
         )
 
         try await service.setTunElevation(true)
@@ -207,7 +207,6 @@ final class LifecycleServiceTests: XCTestCase {
         var spawnedElevated: [Bool] = []
 
         let service = LifecycleService(
-            logger: testLogger,
             runningKernel: { running },
             setRunningKernel: { running = $0 },
             activeKernel: { record },
@@ -224,7 +223,8 @@ final class LifecycleServiceTests: XCTestCase {
             },
             processKiller: { _, _, _ in 0 },
             isProcessRunning: { _ in false },
-            tunPrivilege: FakeLifecycleTunPrivilege(onAcquire: { acquireCalled = true })
+            tunPrivilege: FakeLifecycleTunPrivilege(onAcquire: { acquireCalled = true }),
+            logger: testLogger
         )
 
         try await service.setTunElevation(true)
