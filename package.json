@@ -10,6 +10,7 @@
     "doctor": "bash run-task-flow.sh doctor",
     "menubar": "bash run-task-flow.sh menubar",
     "menubar-install": "bash run-task-flow.sh menubar-install",
+    "run-tests": "bash run_mihomo_tests.sh",
     "verify": "bash run-task-flow.sh verify"
   }
 }

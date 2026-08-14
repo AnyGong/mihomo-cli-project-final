@@ -46,6 +46,23 @@ final class CLIBridge {
             process.executableURL = URL(fileURLWithPath: cliPath)
             process.arguments = arguments
 
+            // Deliberately detached from any real terminal: without this,
+            // the child inherits whatever stdin this app itself happens to
+            // have (a real TTY if launched from a Terminal session running
+            // `swift run`/the built binary directly), which makes
+            // `isatty(STDIN_FILENO)` true inside mihomo-cli and routes it
+            // into an *interactive* confirmation prompt (e.g. "multiple
+            // active network services found" in `net system-proxy on`) that
+            // then reads from a stdin nobody is typing into — producing a
+            // spurious `error: invalid selection — selected index out of
+            // range` instead of the clean non-interactive failure message
+            // (AI.md §3 convention #12 expects exactly that fail-closed
+            // path, not this). Pinning stdin to /dev/null makes every
+            // invocation deterministically non-interactive, matching how
+            // this app always passes `--yes`/`--force` itself rather than
+            // ever answering a prompt.
+            process.standardInput = FileHandle.nullDevice
+
             let outPipe = Pipe()
             let errPipe = Pipe()
             process.standardOutput = outPipe

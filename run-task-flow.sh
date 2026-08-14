@@ -10,8 +10,6 @@
 #   ./run-task-flow.sh test         # just swift test
 #   ./run-task-flow.sh install      # release build -> /usr/local/bin/mihomo-cli
 #   ./run-task-flow.sh doctor       # swift run mihomo-cli doctor (requires a real Mac + kernel installed)
-#   ./run-task-flow.sh menubar      # swift build --product mihomo-menubar (debug)
-#   ./run-task-flow.sh menubar-install # release build -> /usr/local/bin/mihomo-menubar
 #   ./run-task-flow.sh verify       # apply -> build -> test (same as no args)
 #
 # NOTE ON NAMING: the real mihomo kernel/proxy binary (e.g. from
@@ -133,58 +131,12 @@ do_install() {
     echo "   Use 'mihomo-cli <command>' from now on — never bare 'mihomo', which is the kernel binary, not this tool."
 }
 
-do_menubar() {
-    require_swift
-    step "swift build --product mihomo-menubar"
-    cd "$PACKAGE_DIR"
-    if swift build --product mihomo-menubar; then
-        ok "mihomo-menubar build succeeded."
-    else
-        fail "mihomo-menubar build failed — fix compile errors above."
-    fi
-}
-
-do_menubar_install() {
-    require_swift
-    local INSTALL_PATH="/usr/local/bin/mihomo-menubar"
-
-    step "swift build -c release --product mihomo-menubar"
-    cd "$PACKAGE_DIR"
-    if ! swift build -c release --product mihomo-menubar; then
-        fail "Release build of mihomo-menubar failed — fix compile errors above."
-    fi
-    ok "Release build succeeded."
-
-    local BUILT_BINARY="$PACKAGE_DIR/.build/release/mihomo-menubar"
-    if [ ! -f "$BUILT_BINARY" ]; then
-        fail "Expected release binary not found at $BUILT_BINARY — did the target name change in Package.swift?"
-    fi
-
-    step "Installing to $INSTALL_PATH"
-    sudo cp "$BUILT_BINARY" "$INSTALL_PATH"
-    sudo chmod +x "$INSTALL_PATH"
-    ok "Installed to $INSTALL_PATH"
-
-    echo
-    local FOUND_PATHS
-    FOUND_PATHS="$(which -a mihomo-menubar 2>/dev/null || true)"
-    if [ "$(echo "$FOUND_PATHS" | wc -l | tr -d ' ')" != "1" ]; then
-        warn "Multiple 'mihomo-menubar' found on PATH — make sure the one that runs first is $INSTALL_PATH:"
-        echo "$FOUND_PATHS"
-    else
-        ok "PATH resolves 'mihomo-menubar' to: $FOUND_PATHS"
-    fi
-    echo "   Launch it with 'mihomo-menubar' (no Dock icon, stays in the menu bar)."
-}
-
 case "$cmd" in
-    apply)          do_apply ;;
-    build)          do_build ;;
-    test)           do_test ;;
-    install)        do_install ;;
-    doctor)         do_doctor ;;
-    menubar)        do_menubar ;;
-    menubar-install) do_menubar_install ;;
+    apply)   do_apply ;;
+    build)   do_build ;;
+    test)    do_test ;;
+    install) do_install ;;
+    doctor)  do_doctor ;;
     verify)
         do_apply
         do_build
@@ -193,9 +145,8 @@ case "$cmd" in
         ok "Verify flow complete: patch applied (if needed), build succeeded, tests passed."
         echo "   Run './run-task-flow.sh install' next to build+install the release binary as 'mihomo-cli',"
         echo "   then './run-task-flow.sh doctor' (or 'mihomo-cli doctor') on the real machine to sanity-check Tun/doctor behavior live."
-        echo "   Or run './run-task-flow.sh menubar' or './run-task-flow.sh menubar-install' for the menu bar app."
         ;;
     *)
-        fail "Unknown command '$cmd'. Use: apply | build | test | install | doctor | menubar | menubar-install | verify"
+        fail "Unknown command '$cmd'. Use: apply | build | test | install | doctor | verify"
         ;;
 esac

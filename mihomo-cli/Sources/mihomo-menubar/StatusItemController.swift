@@ -191,10 +191,53 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func toggleSystemProxy() {
         let turningOn = systemProxyItem.state != .on
         Task {
-            let args = turningOn ? ["net", "system-proxy", "on", "--yes"] : ["net", "system-proxy", "off"]
-            let result = try? await bridge.run(args)
-            await handle(result, action: turningOn ? "enable system proxy" : "disable system proxy")
+            guard turningOn else {
+                let result = try? await bridge.run(["net", "system-proxy", "off"])
+                await handle(result, action: "disable system proxy")
+                return
+            }
+
+            let result = try? await bridge.run(["net", "system-proxy", "on", "--yes"])
+            if let result, !result.succeeded, result.stderr.contains("multiple active network services") {
+                await presentInterfacePicker()
+                return
+            }
+            await handle(result, action: "enable system proxy")
         }
+    }
+
+    /// Fallback for the case `net system-proxy on --yes` can't resolve on
+    /// its own: more than one network service is active and this app never
+    /// passes `--interface` up front (see spec doc §2.5 — deliberately
+    /// non-interactive by default). Mirrors the CLI's own terminal prompt
+    /// ("Multiple active network services found... Which should carry the
+    /// proxy?") as an NSAlert + popup button instead of a readline prompt.
+    private func presentInterfacePicker() async {
+        let services = NetworkServiceLister.listAllServiceNames()
+        guard !services.isEmpty else {
+            presentAlert(
+                title: "Couldn't enable system proxy",
+                message: "Multiple active network services were found, but none could be listed to choose from. Run 'mihomo net system-proxy on --interface <name>' from a terminal instead."
+            )
+            return
+        }
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        popup.addItems(withTitles: services)
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Which network service should carry the proxy?"
+        alert.informativeText = "More than one active network service was found."
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Enable")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let chosen = popup.titleOfSelectedItem else { return }
+
+        let result = try? await bridge.run(["net", "system-proxy", "on", "--interface", chosen, "--yes"])
+        await handle(result, action: "enable system proxy on '\(chosen)'")
     }
 
     @objc private func toggleTun() {
