@@ -9,6 +9,7 @@ the command surface, error format, and exit codes defined in the design specs:
 - `docs/mihomo_control_api_integration_spec.md` — the KernelClient contract implemented in `mihomo-cli/Sources/mihomo-cli/KernelAPI/`
 - `docs/mihomo_api_reference_notes.md` — real mihomo API field reference, already applied to `KernelClient.swift`
 - `docs/mihomo_tun_privilege_spike_guide.md` + `scripts/tun_privilege_spike.sh` — documents the completed Tun-mode privilege spike. The mechanism is confirmed as `sudo`-elevated mihomo launch; the scoped sudoers NOPASSWD rule remains an optional convenience.
+- `docs/mihomo_menubar_spec.md` — the macOS menu bar companion app (`mihomo-menubar` target). A deliberate, narrow exception to this project's "no GUI" scope — read its §0 first.
 
 ## Requirements to build
 
@@ -17,9 +18,10 @@ the command surface, error format, and exit codes defined in the design specs:
 
 ```
 cd mihomo-cli
-swift build
+swift build                       # builds mihomo-cli AND mihomo-menubar
 swift test --disable-sandbox
 swift run mihomo-cli --help
+swift run mihomo-menubar          # launches the menu bar icon (see docs/mihomo_menubar_spec.md)
 ```
 
 ## Layout
@@ -49,6 +51,14 @@ mihomo-cli/                       <- the Swift package
       ResumableDownloader.swift  Range-resume helper for downloads
       ProcessController.swift    launch/stop/is-running wrapper for kernel processes
   Tests/mihomo-cliTests/
+  Sources/mihomo-menubar/       macOS menu bar companion app → docs/mihomo_menubar_spec.md
+    main.swift                  entry point, runs NSApplication
+    AppDelegate.swift           sets accessory activation policy, owns the status item controller
+    StatusItemController.swift  builds the NSStatusItem/NSMenu, wires actions, polls state
+    MenuBarState.swift          fetches mode/net/subscription snapshot via `mihomo-cli ... --json`
+    CLIBridge.swift             Process wrapper for shelling out to mihomo-cli
+    CLILocator.swift            resolves the mihomo-cli binary path to run
+    LoginItemAgent.swift        Launch-at-Login via a dedicated launchd agent
 ```
 
 ## Kernel provenance policy
@@ -86,6 +96,9 @@ Kernel binaries are fetched **only** via HTTPS directly against the official ups
 - `AppLogger` — structured leveled logging (`info`, `warning`, `error`) with automatic size-based log rotation (5MB, 5 files) and immutable structured audit log recording (`audit.log`). Powers `log` and `audit` commands. Tested in `Tests/mihomo-cliTests/LoggerTests.swift`.
 - `DoctorService` — dry-run pre-flight diagnostic suite verifying 7 subsystem checks (kernel binary, subscription validity, port availability, system proxy consistency, Tun entitlement, daemon health, disk/log headroom) in table or `--json` format without modifying state. Tested in `Tests/mihomo-cliTests/DoctorServiceTests.swift`.
 - `UninstallService` — ordered, best-effort teardown (stop kernel -> remove launchd agent -> revert proxy -> net off -> optional `--purge-data`). Tested in `Tests/mihomo-cliTests/UninstallServiceTests.swift`.
+
+**Written, not yet built/tested on real hardware:**
+- `mihomo-menubar` — the macOS menu bar icon (persistent status item; Show Main Window; Outbound Mode submenu; Set as System Proxy / Enhanced Mode toggles; Switch Configuration submenu; Reload Configuration; Launch at Login). Drives everything by shelling out to `mihomo-cli`, so it has no business logic of its own to re-test — see `docs/mihomo_menubar_spec.md`. Written in a sandbox with no Swift/AppKit toolchain available; run `swift build` on the Mac Mini and exercise it against a running kernel before trusting it, same as the rest of this project originally required (see AI.md §4 item #6).
 
 ## Implementation roadmap status
 

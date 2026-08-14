@@ -6,7 +6,7 @@
 
 ## 1. What this project is
 
-A pure command-line manager for the **mihomo** proxy kernel, for **personal local use on a single machine: a Mac Mini M4 running macOS 27 Beta.** No GUI, ever. No distribution, no other users, no support matrix — this is not a product being shipped to anyone, and every requirement-closure item that only mattered for distribution (code signing, distribution channel, the tool's own versioning policy, a broader macOS version floor, a license) has been explicitly canceled as not applicable. It manages: kernel binary versions, subscription (proxy config) files, network runtime mode (system proxy / Tun / port-based), and traffic rule mode (rule / global / direct) — entirely through terminal commands.
+A pure command-line manager for the **mihomo** proxy kernel, for **personal local use on a single machine: a Mac Mini M4 running macOS 27 Beta.** No GUI, ever — with one explicit, narrow exception: a macOS menu bar icon, added later and specified in full in `docs/mihomo_menubar_spec.md` (read its §0 before assuming any other GUI/distribution scope has changed; it hasn't — no window, no settings pane, no packaging). No distribution, no other users, no support matrix — this is not a product being shipped to anyone, and every requirement-closure item that only mattered for distribution (code signing, distribution channel, the tool's own versioning policy, a broader macOS version floor, a license) has been explicitly canceled as not applicable. It manages: kernel binary versions, subscription (proxy config) files, network runtime mode (system proxy / Tun / port-based), and traffic rule mode (rule / global / direct) — entirely through terminal commands.
 
 This is not a wrapper around an existing GUI client. It is a new, independent tool, implemented in **Swift** (Swift Package Manager, `swift-argument-parser`), chosen specifically because the platform scope is macOS-only and the tool needs to shell out to `networksetup`, `launchd`, and Tun-interface primitives natively.
 
@@ -26,11 +26,12 @@ docs/
   mihomo_requirement_development_plan.md
   mihomo_api_reference_notes.md
   mihomo_tun_privilege_spike_guide.md
+  mihomo_menubar_spec.md                 <- the macOS menu bar app; read its own §0 first
   superseded-drafts/                     <- old per-group specs, kept for diff history only
 scripts/
   tun_privilege_spike.sh                 <- run this on the Mac Mini to resolve open decision #1
 mihomo-cli/                              <- the Swift Package Manager project itself
-  Package.swift, Sources/, Tests/
+  Package.swift, Sources/mihomo-cli/, Sources/mihomo-menubar/, Tests/
 ```
 
 | # | File | What it is | Status |
@@ -43,6 +44,7 @@ mihomo-cli/                              <- the Swift Package Manager project it
 | 5b | `docs/mihomo_requirement_development_plan.md` | Project-management layer above the implementation plan: a requirement-closure register (open questions not yet answered anywhere else, e.g. code signing, distribution channel, telemetry stance) plus a phased deliverables list (Phase 0–9) with exit criteria per phase. **Read this to know what to build next and what still needs a decision before building it.** | Final, authoritative |
 | 5c | `docs/mihomo_api_reference_notes.md` | Official mihomo control-API endpoint reference (sourced from mihomo's own docs, not general Clash-API memory), mapped to which command uses which endpoint, with a concrete code-correction checklist already applied to `KernelClient.swift`. Requirement-closure item #2 is now closed by live smoke testing against a running mihomo instance. | Final, live-confirmed for this project's current endpoint use |
 | 5d | `docs/mihomo_tun_privilege_spike_guide.md` + `scripts/tun_privilege_spike.sh` | Resolves requirement-closure item #1: the hardware spike confirmed that `utun` creation requires elevation and that `sudo`-elevated mihomo launch works on the Mac Mini. The guide's scoped `sudoers.d` NOPASSWD rule remains an optional daily-use convenience, not a blocker. | Final, hardware-confirmed |
+| 5e | `docs/mihomo_menubar_spec.md` | The macOS menu bar companion app (`mihomo-menubar` target). **Read its §0 first** — it documents a deliberate, narrow exception to this file's "No GUI, ever" line below, and what is/isn't in scope of that exception. | Final, authoritative |
 | 6 | `docs/mihomo_Kernel_Pure_CLI_Manager_Design_Document_v2.md` | The revised original design document (§1–5) that the Full Specification is built on top of. | Superseded by #3 for behavior detail, but useful for the narrative "why does this section exist" framing |
 | 7 | `README.md` | Build instructions, file layout, and a live "what's real vs. stubbed" status table. Lives at the package root, not inside `mihomo-cli/` — see entry 16 in `CHANGELOG.md` for why. | **Update this every time you implement something** — it is the fastest way for the next assistant (or human) to know current state without re-reading this whole file |
 
@@ -81,6 +83,7 @@ Full detail is in `CHANGELOG.md`; this is the condensed version so you don't hav
 8. The Support layer was implemented for real (not stubbed): `AdvisoryLock` (real `flock(2)`), `MetadataStore` (JSON-backed, atomic writes, actor-isolated), plus `kernel list`, `sub list`, and `kernel rm`'s active-kernel guard wired to real store data. Unit tests exist for both `AdvisoryLock` and `MetadataStore`.
 9. A full implementation/test/verification plan was written for every remaining layer (`KernelClient` HTTP implementation, then `kernel`/`sub`/`mode`/`net`/`daemon`+diagnostics groups), including flagged open design decisions (notably: the exact macOS mechanism for Tun-mode privilege escalation needs a hardware prototype/spike, not a guess from documentation).
 10. This file (`AI.md`) and `CHANGELOG.md` were written to hand the project to other AI tooling without losing any of the above.
+11. User requested a macOS menu bar icon (persistent status item; Show Main Window; Outbound Mode submenu; Set as System Proxy and Enhanced Mode/TUN toggles; Switch Configuration submenu; Reload Configuration; Launch at Login toggle) — an explicit, narrow exception to "No GUI, ever" (see §1 and `docs/mihomo_menubar_spec.md` §0). Implemented as a second SwiftPM executable target, `mihomo-menubar`, that never links against the `mihomo-cli` target and drives every action by shelling out to the built `mihomo-cli` binary, so all locking/atomic-switch/rollback/liveness-check logic continues to live in exactly one place. No app bundle, Info.plist, code signing, or installer — accessory-mode activation policy is set at runtime instead, and Launch at Login reuses the existing `launchd` agent pattern from `Support/LaunchdAgent.swift` via a second, independent plist. **Not yet compiled/tested on the Mac Mini** — written and reasoned through in a sandbox with no Swift/AppKit toolchain available, same caveat as item #6 originally carried for the whole package.
 
 ## 5. Current implementation status (snapshot — verify against `README.md` for the live version)
 
@@ -118,6 +121,9 @@ Full detail is in `CHANGELOG.md`; this is the condensed version so you don't hav
 
 **Verified to compile/test:**
 - `swift test --disable-sandbox` executed on 2026-08-14: **127 XCTest unit tests, 0 failures** (Apple Swift 6.4, macOS 27 SDK).
+
+**New, not yet verified on real hardware:**
+- `mihomo-menubar` target (`Sources/mihomo-menubar/`) — the macOS menu bar companion app. Full behavior and rationale in `docs/mihomo_menubar_spec.md`. Written without access to a Swift/AppKit toolchain; run `swift build` on the Mac Mini before trusting it, same as every other line in this file's history originally required (§4 item #6). No automated tests yet — `NSStatusItem`/`NSMenu` UI is not XCTest-friendly the way the rest of this codebase is; if that changes, `CLILocator`, `CLIBridge`, and `LoginItemAgent` are the pieces most worth unit-testing first since they contain the only non-trivial logic (everything else is menu construction).
 - `CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache" SWIFTPM_CACHE_PATH="$PWD/.build/swiftpm-cache" swift test --disable-sandbox` is the standard test command.
 
 ## 6. Verification checklist and release gate

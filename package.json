@@ -8,6 +8,8 @@
     "test": "bash run-task-flow.sh test",
     "install-cli": "bash run-task-flow.sh install",
     "doctor": "bash run-task-flow.sh doctor",
+    "menubar": "bash run-task-flow.sh menubar",
+    "menubar-install": "bash run-task-flow.sh menubar-install",
     "verify": "bash run-task-flow.sh verify"
   }
 }

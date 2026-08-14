@@ -31,6 +31,20 @@ let package = Package(
             ],
             path: "Sources/mihomo-cli"
         ),
+        // Menu bar companion app (docs/mihomo_menubar_spec.md). Deliberately
+        // has zero dependencies beyond system frameworks (AppKit,
+        // ServiceManagement isn't used — see spec for why) and never links
+        // against the `mihomo-cli` target: it drives the tool exclusively by
+        // shelling out to the built `mihomo-cli` executable, the same way a
+        // person would from a terminal, so every action it triggers reuses
+        // already-tested business logic (locking, atomic switch, rollback)
+        // instead of duplicating it. This keeps the GUI layer thin and
+        // avoids the risk of the two surfaces drifting out of sync.
+        .executableTarget(
+            name: "mihomo-menubar",
+            dependencies: [],
+            path: "Sources/mihomo-menubar"
+        ),
         .testTarget(
             name: "mihomo-cliTests",
             dependencies: [
