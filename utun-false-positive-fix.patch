@@ -1,0 +1,282 @@
+diff --git a/AI.md b/AI.md
+index 980354b..2b986e7 100644
+--- a/AI.md
++++ b/AI.md
+@@ -105,7 +105,7 @@ Full detail is in `CHANGELOG.md`; this is the condensed version so you don't hav
+   - `ModeService` — `mode status` (compares live kernel mode with subscription embedded default, reporting matches vs. CLI overrides), `mode rule`, `mode global` (safety confirmation prompt, exit 2 on decline), and `mode direct` (safety confirmation prompt, exit 2 on decline) using runtime `PATCH /configs` overlays and `livenessCheck` readbacks. Tested (`ModeServiceTests.swift`).
+ - **`net` command group** ([`NetCommand.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/NetCommand.swift)):
+   - `NetworkSetup` — testable wrapper around macOS `/usr/sbin/networksetup` managing service enumeration, active IP link detection, and web proxy configuration. Tested (`NetworkSetupTests.swift`).
+-  - `PortInspector` — testable wrapper around `/usr/sbin/lsof` (for TCP LISTEN port checking with process PID/name attribution) and `/sbin/ifconfig` (for `utun` conflict detection).
++  - `PortInspector` — testable wrapper around `/usr/sbin/lsof` (for TCP LISTEN port checking with process PID/name attribution) and `/sbin/ifconfig -a` (for `utun` conflict detection — requires `UP` **and** a non-link-local address, not name-presence alone; see CHANGELOG #27, a real-hardware false-positive fix). Tested (`PortInspectorTests.swift`).
+   - `NetService` — `net status` (table / `--json`), `net system-proxy on|off` (single service auto-selection, multiple active services prompt vs `--interface`, pre-existing foreign proxy overwrite warning/prompt), `net tun on|off` (privilege elevation verification exit 6, utun collision exit 7), `net proxy-mode on|off` (port conflict check exit 7), and `net off` (idempotent deactivation). Enforces mutual exclusivity across all modes. Tested (`NetServiceTests.swift`).
+ - **`daemon` command group** ([`DaemonCommand.swift`](file:///Users/john/Downloads/mihomo-cli-project-final/mihomo-cli/Sources/mihomo-cli/Commands/DaemonCommand.swift)):
+   - `DaemonService` & `LaunchdAgent` — manages `~/Library/LaunchAgents/com.mihomo-cli.agent.plist` generation, `launchctl bootstrap`/`bootout`, and `MetadataStore` supervision state tracking (`daemon install`, `daemon remove`, `daemon status`). Tested (`LaunchdAgentTests.swift`).
+@@ -134,6 +134,8 @@ All software layers are built and covered with comprehensive automated unit test
+ 4. **Net Group**:
+    - [ ] Multi-interface system-proxy: confirm prompt displays real network services and applies proxy in macOS System Settings.
+    - [ ] Tun mode: verify `sudo`-elevated launch on real hardware, check `utun` interface creation and routing, verify teardown leaves no orphaned `utun` devices.
++   - [x] ~~`net tun on` always failed with "utun interface already claimed" on real hardware, even with nothing running~~ **root-caused and fixed (see CHANGELOG #27):** `isUtunInterfacePresent()` checked interface *name* presence only, which macOS pre-allocates for its own frameworks on every Mac; now requires `UP` + a real (non-link-local) address. Unit-tested against captured `ifconfig -a` shapes. **Still needs a real re-run of `net tun on` on the Mac Mini** — not yet re-verified on hardware, only reasoned + unit-tested.
++   - [ ] Follow-up noted in CHANGELOG #27, not yet actioned: `kernel use <already-active>`'s no-op fast path trusts the stored active-kernel pointer without checking whether a process is actually alive (unlike `kernel status`, which does check). Reconcile the two before relying on `kernel use`'s no-op path as a liveness signal.
+ 5. **Daemon & Lifecycle**:
+    - [ ] `daemon install`, then force-kill kernel (`kill -9`) — confirm `launchd` auto-restarts it and increments restart count in `daemon status`.
+    - [ ] `mihomo stop` while daemon is installed — confirm it does **not** auto-restart (user-initiated stop contract).
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index a19c58e..1cc154f 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -442,3 +442,15 @@ Layer 7 (`daemon` command group, manual lifecycle `start`/`stop`/`restart`, `log
+
+
+
++
++## 27. Bugfix — `net tun on` false-positive utun collision on real hardware
++
++Manual QA on the Mac Mini surfaced `mihomo-cli net tun on` failing every time with `error: cannot start Tun mode — utun interface already claimed, likely by another VPN client`, even with `ps aux | grep mihomo` showing nothing running and no VPN client active.
++
++**Root cause:** `PortInspector.isUtunInterfacePresent()` ran `ifconfig -l`, which only lists interface *names* — not state. macOS pre-allocates several `utun0`–`utun3`+ slots at boot for its own frameworks (Continuity, Personal Hotspot, etc.), so the name is present on essentially every Mac whether or not any VPN has ever connected. Treating name-presence as "claimed" made Tun mode permanently unusable, not just occasionally conflicting.
++
++**Fix:** `PortInspector.isUtunInterfacePresent()` now runs `ifconfig -a` (flags + assigned addresses per interface, not just names) and only reports a collision when a `utun*` interface is both `UP` **and** carries a real address — an auto-assigned link-local IPv6 address (`fe80::...%utunN`) on an otherwise-idle `UP` slot does not count, since that's exactly the false-positive pattern observed on hardware; a real IPv4 address or a non-link-local IPv6 address does. The parsing logic is factored into a new static, directly-testable function, `PortInspector.hasActiveUtunTunnel(ifconfigOutput:)`.
++
++**Also noted, not yet fixed (pre-existing, unrelated to this bug):** the same session's manual QA also showed `kernel use <already-active-version>` reporting "already the active kernel, nothing to do" while `ps aux` showed no such process running at all — i.e. the metadata store's "active" pointer had gone stale relative to the real process state (most likely from earlier testing sessions). `kernel use`'s no-op fast path only compares against the *stored* active-version pointer, never against whether a process is actually alive. This is worth a follow-up: either `kernel use`'s no-op check or `kernel status`/`doctor` should cross-check `MetadataStore.runningKernel()` + `ProcessController.isRunning(pid:)`, not just the active-kernel record, before declaring "nothing to do" (`kernel status` already does this cross-check for its own display — see `KernelStatusService.swift` — but `kernel use`'s no-op path does not; the two were implemented against different assumptions and should be reconciled).
++
++**Testing:** `Tests/mihomo-cliTests/PortInspectorTests.swift` (new, 9 unit tests) — idle-Mac false-positive shape (UP slots with only link-local IPv6) reports no collision; live VPN with IPv4 tunnel address reports a collision; live VPN with a routable (non-link-local) IPv6 address reports a collision; `UP` with no address at all does not; a matching address on a `DOWN` interface does not; non-`utun` interfaces with real addresses never count; empty output; plus two smoke tests for the pre-existing `lsof` parser, which had no dedicated test file before. **Not yet re-verified on the real Mac Mini** — the original report came from hardware, but this fix has only been reasoned through and unit-tested against captured `ifconfig -a` output shapes, not run against `swift test` (no Swift toolchain in this sandbox environment); re-running `net tun on` on the actual machine remains the real confirmation.
+diff --git a/README.md b/README.md
+index 0ed4207..f958a9c 100644
+--- a/README.md
++++ b/README.md
+@@ -80,7 +80,7 @@ Kernel binaries are fetched **only** via HTTPS directly against the official ups
+ - `mihomo sub validate` — standalone validation command reporting structured errors with line numbers.
+ - `SubscriptionService` tested in `Tests/mihomo-cliTests/SubscriptionServiceTests.swift` including import safety tests verifying user files on disk are never mutated.
+ - `ModeService` — manages traffic rule mode (`mode status`, `mode rule`, `mode global`, `mode direct`) via control API `PATCH /configs` runtime overlays and `livenessCheck` readbacks, with safety confirmation prompts for Global/Direct modes and embedded subscription default comparisons. Tested in `Tests/mihomo-cliTests/ModeServiceTests.swift`.
+-- `NetService`, `NetworkSetup`, & `PortInspector` — manages macOS network routing modes (`net status`, `net system-proxy on|off`, `net tun on|off`, `net proxy-mode on|off`, `net off`) with mutual exclusivity, `networksetup` system proxy integration, port conflict detection via `lsof` with PID/process attribution, utun detection via `ifconfig`, and privilege safety handling. Tested in `Tests/mihomo-cliTests/NetServiceTests.swift` and `Tests/mihomo-cliTests/NetworkSetupTests.swift`.
++- `NetService`, `NetworkSetup`, & `PortInspector` — manages macOS network routing modes (`net status`, `net system-proxy on|off`, `net tun on|off`, `net proxy-mode on|off`, `net off`) with mutual exclusivity, `networksetup` system proxy integration, port conflict detection via `lsof` with PID/process attribution, and privilege safety handling. utun collision detection uses `ifconfig -a` and requires the interface to be `UP` **and** carry a non-link-local address, not just be present by name — a real-hardware false-positive fix, see CHANGELOG #27. Tested in `Tests/mihomo-cliTests/NetServiceTests.swift`, `Tests/mihomo-cliTests/NetworkSetupTests.swift`, and `Tests/mihomo-cliTests/PortInspectorTests.swift`.
+ - `DaemonService` & `LaunchdAgent` — manages `~/Library/LaunchAgents/com.mihomo-cli.agent.plist` for launchd supervision, crash detection, restart tracking, and persistence (`daemon install`, `daemon remove`, `daemon status`). Tested in `Tests/mihomo-cliTests/LaunchdAgentTests.swift`.
+ - `LifecycleService` — manual lifecycle controls (`start`, `stop`, `restart`) with user-initiated stop flagging for daemon supervision, integrity checks, liveness checks, and restart rollback. Tested in `Tests/mihomo-cliTests/LifecycleServiceTests.swift`.
+ - `AppLogger` — structured leveled logging (`info`, `warning`, `error`) with automatic size-based log rotation (5MB, 5 files) and immutable structured audit log recording (`audit.log`). Powers `log` and `audit` commands. Tested in `Tests/mihomo-cliTests/LoggerTests.swift`.
+diff --git a/mihomo-cli/Sources/mihomo-cli/Support/PortInspector.swift b/mihomo-cli/Sources/mihomo-cli/Support/PortInspector.swift
+index 40dc9ec..8fc3ed0 100644
+--- a/mihomo-cli/Sources/mihomo-cli/Support/PortInspector.swift
++++ b/mihomo-cli/Sources/mihomo-cli/Support/PortInspector.swift
+@@ -35,9 +35,16 @@ final class PortInspector: PortInspecting {
+     }
+
+     func isUtunInterfacePresent() -> Bool {
++        // `ifconfig -l` only lists interface *names*, and macOS pre-allocates
++        // several idle utun slots at boot for its own frameworks (Continuity,
++        // Personal Hotspot, etc.) even with zero VPNs ever configured — so a
++        // presence-only check false-positives on nearly every Mac and
++        // permanently blocks Tun mode. `-a` gives flags + assigned addresses
++        // per interface, which is what's actually needed to tell an idle
++        // slot apart from a live tunnel.
+         let process = Process()
+         process.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
+-        process.arguments = ["-l"]
++        process.arguments = ["-a"]
+
+         let pipe = Pipe()
+         process.standardOutput = pipe
+@@ -52,8 +59,7 @@ final class PortInspector: PortInspecting {
+
+         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+         let output = String(data: data, encoding: .utf8) ?? ""
+-        let interfaces = output.components(separatedBy: .whitespacesAndNewlines)
+-        return interfaces.contains(where: { $0.lowercased().hasPrefix("utun") })
++        return PortInspector.hasActiveUtunTunnel(ifconfigOutput: output)
+     }
+
+     // MARK: - Parsing Helpers (Static & Testable)
+@@ -73,4 +79,68 @@ final class PortInspector: PortInspecting {
+         }
+         return nil
+     }
++
++    /// Parses `ifconfig -a` output (block-per-interface, continuation lines
++    /// indented) and reports whether any `utun*` interface is both `UP` and
++    /// carries a real address — the actual signature of a live VPN tunnel.
++    ///
++    /// Idle, macOS-preallocated utun slots are frequently `UP,RUNNING` too,
++    /// but sit with either no address at all or only an auto-assigned
++    /// link-local IPv6 (`fe80::...%utunN`), so `UP` alone is not sufficient —
++    /// this deliberately requires an address, and excludes link-local IPv6,
++    /// to avoid the same false-positive the name-only check had.
++    static func hasActiveUtunTunnel(ifconfigOutput: String) -> Bool {
++        var currentIsUtun = false
++        var currentIsUp = false
++        var currentHasRoutableAddress = false
++        var foundActive = false
++
++        func flushCurrentInterface() {
++            if currentIsUtun && currentIsUp && currentHasRoutableAddress {
++                foundActive = true
++            }
++        }
++
++        for rawLine in ifconfigOutput.components(separatedBy: .newlines) {
++            guard !rawLine.isEmpty else { continue }
++
++            let isContinuationLine = rawLine.hasPrefix(" ") || rawLine.hasPrefix("\t")
++            if !isContinuationLine {
++                // New interface header, e.g. "utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500"
++                flushCurrentInterface()
++
++                let name = rawLine.split(separator: ":", maxSplits: 1).first.map(String.init) ?? ""
++                currentIsUtun = name.lowercased().hasPrefix("utun")
++                currentHasRoutableAddress = false
++
++                if let flagsRange = rawLine.range(of: "<"),
++                   let flagsEnd = rawLine.range(of: ">", range: flagsRange.upperBound..<rawLine.endIndex) {
++                    let flags = rawLine[flagsRange.upperBound..<flagsEnd.lowerBound]
++                    currentIsUp = flags.split(separator: ",").contains("UP")
++                } else {
++                    currentIsUp = false
++                }
++                continue
++            }
++
++            guard currentIsUtun else { continue }
++            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
++            let tokens = trimmed.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
++            guard let kind = tokens.first else { continue }
++
++            if kind == "inet" {
++                // Any IPv4 address on a utun interface is a real assigned
++                // tunnel endpoint — utun interfaces don't get IPv4 by default.
++                currentHasRoutableAddress = true
++            } else if kind == "inet6", tokens.count > 1 {
++                let address = tokens[1]
++                if !address.lowercased().hasPrefix("fe80") {
++                    currentHasRoutableAddress = true
++                }
++            }
++        }
++        flushCurrentInterface()
++
++        return foundActive
++    }
+ }
+diff --git a/mihomo-cli/Tests/mihomo-cliTests/PortInspectorTests.swift b/mihomo-cli/Tests/mihomo-cliTests/PortInspectorTests.swift
+new file mode 100644
+index 0000000..5145a22
+--- /dev/null
++++ b/mihomo-cli/Tests/mihomo-cliTests/PortInspectorTests.swift
+@@ -0,0 +1,120 @@
++import Foundation
++import XCTest
++@testable import mihomo_cli
++
++/// Regression coverage for `PortInspector.hasActiveUtunTunnel`.
++///
++/// Originally `isUtunInterfacePresent()` ran `ifconfig -l` and treated any
++/// interface *named* `utunN` as "claimed by a VPN". macOS pre-allocates
++/// several idle utun slots at boot for its own frameworks (Continuity,
++/// Personal Hotspot, etc.), so that check false-positived on essentially
++/// every Mac and permanently blocked `mihomo net tun on` with "utun
++/// interface already claimed" even with no VPN running at all. The fix
++/// requires the interface to be both `UP` and carrying a real (non
++/// link-local) address before treating it as a live tunnel.
++final class PortInspectorTests: XCTestCase {
++
++    func testIdleMacWithNoVPNIsNotReportedAsClaimed() {
++        // Real-world shape: several pre-allocated utun slots, UP/RUNNING,
++        // each with nothing but an auto-assigned link-local IPv6 address —
++        // this is the exact false-positive case from the bug report.
++        let output = """
++        lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
++        \tinet 127.0.0.1 netmask 0xff000000
++        \tinet6 ::1 prefixlen 128
++        en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
++        \tinet 192.168.1.42 netmask 0xffffff00 broadcast 192.168.1.255
++        utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
++        \tinet6 fe80::afaa:2233:4455:6677%utun0 prefixlen 64 scopeid 0x14
++        utun1: flags=8010<POINTOPOINT,MULTICAST> mtu 1380
++        utun2: flags=8010<POINTOPOINT,MULTICAST> mtu 1500
++        utun3: flags=8010<POINTOPOINT,MULTICAST> mtu 1500
++        """
++
++        XCTAssertFalse(PortInspector.hasActiveUtunTunnel(ifconfigOutput: output))
++    }
++
++    func testLiveVPNWithIPv4TunnelAddressIsReportedAsClaimed() {
++        let output = """
++        lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
++        \tinet 127.0.0.1 netmask 0xff000000
++        en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
++        \tinet 192.168.1.42 netmask 0xffffff00 broadcast 192.168.1.255
++        utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
++        \tinet6 fe80::afaa:2233:4455:6677%utun0 prefixlen 64 scopeid 0x14
++        utun1: flags=8010<POINTOPOINT,MULTICAST> mtu 1380
++        utun3: flags=80d1<UP,POINTOPOINT,RUNNING,NOARP,MULTICAST> mtu 1380
++        \tinet 10.8.0.4 --> 10.8.0.1 netmask 0xffffffff
++        """
++
++        XCTAssertTrue(PortInspector.hasActiveUtunTunnel(ifconfigOutput: output))
++    }
++
++    func testLiveVPNWithRoutableIPv6TunnelAddressIsReportedAsClaimed() {
++        let output = """
++        utun4: flags=80d1<UP,POINTOPOINT,RUNNING,NOARP,MULTICAST> mtu 1280
++        \tinet6 fe80::1%utun4 prefixlen 64 scopeid 0x16
++        \tinet6 2001:db8:1234::2 prefixlen 64
++        """
++
++        XCTAssertTrue(PortInspector.hasActiveUtunTunnel(ifconfigOutput: output))
++    }
++
++    func testUtunUpWithNoAddressAtAllIsNotReportedAsClaimed() {
++        // Some idle slots report UP without ever getting even a link-local
++        // address assigned — still not a real tunnel.
++        let output = """
++        utun2: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500
++        """
++
++        XCTAssertFalse(PortInspector.hasActiveUtunTunnel(ifconfigOutput: output))
++    }
++
++    func testUtunDownWithStaleAddressIsNotReportedAsClaimed() {
++        // Flags without UP — interface administratively down. Even if an
++        // address is still attached from a prior session, it isn't a live
++        // tunnel right now.
++        let output = """
++        utun5: flags=8010<POINTOPOINT,MULTICAST> mtu 1380
++        \tinet 10.8.0.4 --> 10.8.0.1 netmask 0xffffffff
++        """
++
++        XCTAssertFalse(PortInspector.hasActiveUtunTunnel(ifconfigOutput: output))
++    }
++
++    func testNonUtunInterfacesNeverCount() {
++        // en0/lo0/etc. having real addresses must never trip the utun check,
++        // regardless of how their blocks are formatted.
++        let output = """
++        en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
++        \tinet 192.168.1.42 netmask 0xffffff00 broadcast 192.168.1.255
++        bridge0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
++        \tinet 192.168.2.1 netmask 0xffffff00 broadcast 192.168.2.255
++        """
++
++        XCTAssertFalse(PortInspector.hasActiveUtunTunnel(ifconfigOutput: output))
++    }
++
++    func testEmptyOutputIsNotReportedAsClaimed() {
++        XCTAssertFalse(PortInspector.hasActiveUtunTunnel(ifconfigOutput: ""))
++    }
++
++    // MARK: - lsof parsing (pre-existing helper, no behavior change — smoke
++    // test only, since this file is now the natural home for PortInspector
++    // coverage and there wasn't one before).
++
++    func testParseLsofOutputExtractsFirstMatchingProcess() {
++        let output = """
++        COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
++        mihomo  4102   john    7u  IPv4 0x1234      0t0  TCP 127.0.0.1:9090 (LISTEN)
++        """
++
++        let result = PortInspector.parseLsofOutput(output)
++        XCTAssertEqual(result, ProcessPortInfo(pid: 4102, command: "mihomo"))
++    }
++
++    func testParseLsofOutputReturnsNilForHeaderOnlyOutput() {
++        let output = "COMMAND   PID   USER   FD   TYPE DEVICE SIZE/OFF NODE NAME"
++        XCTAssertNil(PortInspector.parseLsofOutput(output))
++    }
++}
