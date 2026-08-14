@@ -172,4 +172,24 @@ final class RuntimeConfigWriterTests: XCTestCase {
         let written = try readWrittenConfig(config)
         XCTAssertEqual(written["mode"] as? String, "global")
     }
+
+    func testUnicodeCharactersArePreservedNotEscaped() throws {
+        let subscriptionYAML = """
+                               filter: "(?i)🇦🇷|阿根廷"
+                               proxies: []
+                               """
+
+        let config = try writer.write(
+            version: "v1",
+            credentials: ControlAPICredentials(port: 9090, secret: "s3cr3t"),
+            mixedPort: 7890,
+            subscriptionYAML: subscriptionYAML,
+            modeOverride: nil
+        )
+
+        let text = try String(contentsOf: config.configURL, encoding: .utf8)
+        XCTAssertTrue(text.contains("🇦🇷"))
+        XCTAssertTrue(text.contains("阿根廷"))
+        XCTAssertFalse(text.contains("\\U0001F1E6"))
+    }
 }

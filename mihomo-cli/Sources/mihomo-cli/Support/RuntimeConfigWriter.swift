@@ -59,7 +59,7 @@ final class RuntimeConfigWriter: RuntimeConfigWriting {
             } else {
                 dict["mode"] = "rule"
             }
-            content = try Yams.dump(object: dict)
+            content = try Yams.dump(object: dict, allowUnicode: true)
         } else {
             let mode = modeOverride ?? "rule"
             content = """
