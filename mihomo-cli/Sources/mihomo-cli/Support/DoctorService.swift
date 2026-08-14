@@ -10,6 +10,9 @@ final class DoctorService {
     private let networkSetup: NetworkSetupManaging
     private let portInspector: PortInspecting
     private let launchdManager: LaunchdManaging
+    private let tunPrivilege: TunPrivilegeManaging
+    private let logDirectory: URL
+    private let minimumFreeBytes: Int64
     private let printLine: (String) -> Void
 
     init(
@@ -21,6 +24,9 @@ final class DoctorService {
         networkSetup: NetworkSetupManaging = NetworkSetup(),
         portInspector: PortInspecting = PortInspector(),
         launchdManager: LaunchdManaging = DefaultLaunchdManager(),
+        tunPrivilege: TunPrivilegeManaging = TunPrivilege(),
+        logDirectory: URL = URL(fileURLWithPath: "\(NSHomeDirectory())/.mihomo-cli/logs"),
+        minimumFreeBytes: Int64 = 200 * 1024 * 1024, // 200MB floor, matches log rotation headroom (5 files x 5MB + slack)
         printLine: @escaping (String) -> Void = { print($0) }
     ) {
         self.activeKernel = activeKernel
@@ -31,6 +37,9 @@ final class DoctorService {
         self.networkSetup = networkSetup
         self.portInspector = portInspector
         self.launchdManager = launchdManager
+        self.tunPrivilege = tunPrivilege
+        self.logDirectory = logDirectory
+        self.minimumFreeBytes = minimumFreeBytes
         self.printLine = printLine
     }
 
@@ -140,8 +149,18 @@ final class DoctorService {
             warnings.append("System proxy settings mismatch detected. Run 'mihomo net system-proxy off' then re-enable to resync.")
         }
 
-        // 5. Tun entitlement
-        checks.append(CheckResult(name: "Tun entitlement", status: "passed", detail: "granted"))
+        // 5. Tun entitlement — real check: does an elevated launch currently
+        // work without a fresh interactive prompt? (NOPASSWD rule installed,
+        // or sudo's timestamp cache is warm from a recent `net tun on`.)
+        // This intentionally does NOT report "granted" just because Tun mode
+        // is marked active in the metadata store — that flag only reflects
+        // intent, not whether privilege is currently usable.
+        if tunPrivilege.hasEntitlement() {
+            checks.append(CheckResult(name: "Tun entitlement", status: "passed", detail: "granted (sudo usable without prompt)"))
+        } else {
+            checks.append(CheckResult(name: "Tun entitlement", status: "warning", detail: "not currently usable — sudo would prompt"))
+            warnings.append("Tun mode privilege is not currently usable without a password prompt. Run 'mihomo net tun on' interactively once, or install the NOPASSWD sudoers.d rule from docs/mihomo_tun_privilege_spike_guide.md.")
+        }
 
         // 6. Daemon health
         let daemon = try await daemonState()
@@ -155,8 +174,31 @@ final class DoctorService {
             warnings.append("Daemon plist state is inconsistent. Run 'mihomo daemon install' or 'daemon remove'.")
         }
 
-        // 7. Disk / log headroom
-        checks.append(CheckResult(name: "Disk / log headroom", status: "passed", detail: "ok"))
+        // 7. Disk / log headroom — real check: free space on the volume
+        // backing the log directory, via statfs. Below `minimumFreeBytes`
+        // is a warning, since log rotation (Support/Logger.swift) needs
+        // headroom to write new segments and the kernel needs somewhere to
+        // write its own stdout/stderr.
+        do {
+            try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+            let attrs = try FileManager.default.attributesOfFileSystem(forPath: logDirectory.path)
+            if let free = attrs[.systemFreeSize] as? NSNumber {
+                let freeBytes = free.int64Value
+                let freeMB = freeBytes / (1024 * 1024)
+                if freeBytes < minimumFreeBytes {
+                    checks.append(CheckResult(name: "Disk / log headroom", status: "warning", detail: "low — \(freeMB)MB free at \(logDirectory.path)"))
+                    warnings.append("Low disk space (\(freeMB)MB free) on the volume backing \(logDirectory.path). Log rotation and kernel output may fail to write.")
+                } else {
+                    checks.append(CheckResult(name: "Disk / log headroom", status: "passed", detail: "ok — \(freeMB)MB free"))
+                }
+            } else {
+                checks.append(CheckResult(name: "Disk / log headroom", status: "warning", detail: "could not determine free space"))
+                warnings.append("Could not determine free disk space at \(logDirectory.path).")
+            }
+        } catch {
+            checks.append(CheckResult(name: "Disk / log headroom", status: "warning", detail: "could not access \(logDirectory.path)"))
+            warnings.append("Could not access log directory \(logDirectory.path): \(error.localizedDescription)")
+        }
 
         if json {
             let report = DoctorReportJSON(checks: checks, warningCount: warnings.count, passed: warnings.isEmpty)

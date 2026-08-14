@@ -34,7 +34,10 @@ let package = Package(
         .testTarget(
             name: "mihomo-cliTests",
             dependencies: ["mihomo-cli"],
-            path: "Tests/mihomo-cliTests"
+            path: "Tests/mihomo-cliTests",
+            resources: [
+                .copy("Fixtures")
+            ]
         ),
     ]
 )

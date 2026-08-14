@@ -95,6 +95,55 @@ struct RunningKernelState: Codable, Equatable {
     var configPath: String
     var stdoutPath: String
     var stderrPath: String
+    /// True if this kernel process was launched via `sudo` because Tun mode
+    /// (design doc §2.3, hardware-confirmed in
+    /// docs/mihomo_tun_privilege_spike_guide.md) is active. Callers that
+    /// signal this process (`stop`, `restart`, `kernel use`'s previous-
+    /// process teardown) must route the signal through `sudo kill` when
+    /// this is true, or it will fail with EPERM. Defaults to `false` and
+    /// decodes as `false` for metadata files written before this field
+    /// existed, preserving backward compatibility (same pattern used for
+    /// `ActiveNetworkMode`/`SystemProxySettings` elsewhere in this file).
+    var elevated: Bool = false
+
+    init(
+        version: String,
+        pid: Int32,
+        startedAt: Date,
+        controlPort: Int,
+        mixedPort: Int,
+        configPath: String,
+        stdoutPath: String,
+        stderrPath: String,
+        elevated: Bool = false
+    ) {
+        self.version = version
+        self.pid = pid
+        self.startedAt = startedAt
+        self.controlPort = controlPort
+        self.mixedPort = mixedPort
+        self.configPath = configPath
+        self.stdoutPath = stdoutPath
+        self.stderrPath = stderrPath
+        self.elevated = elevated
+    }
+
+    enum CodingKeys: CodingKey {
+        case version, pid, startedAt, controlPort, mixedPort, configPath, stdoutPath, stderrPath, elevated
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decode(String.self, forKey: .version)
+        self.pid = try container.decode(Int32.self, forKey: .pid)
+        self.startedAt = try container.decode(Date.self, forKey: .startedAt)
+        self.controlPort = try container.decode(Int.self, forKey: .controlPort)
+        self.mixedPort = try container.decode(Int.self, forKey: .mixedPort)
+        self.configPath = try container.decode(String.self, forKey: .configPath)
+        self.stdoutPath = try container.decode(String.self, forKey: .stdoutPath)
+        self.stderrPath = try container.decode(String.self, forKey: .stderrPath)
+        self.elevated = try container.decodeIfPresent(Bool.self, forKey: .elevated) ?? false
+    }
 }
 
 /// Active network mode per design doc §2.1 and §6.3.

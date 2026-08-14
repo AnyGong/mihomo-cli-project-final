@@ -245,11 +245,13 @@ final class NetServiceTests: XCTestCase {
         let fakeInspector = FakePortInspector(utunPresent: false, listeningProcesses: [:])
         var appliedMode: ActiveNetworkMode = .none
         var printed: [String] = []
+        var elevationCalls: [Bool] = []
 
         let service = NetService(
             networkMode: { appliedMode },
             setNetworkMode: { appliedMode = $0 },
             portInspector: fakeInspector,
+            setTunElevation: { elevationCalls.append($0) },
             printLine: { printed.append($0) }
         )
 
@@ -260,7 +262,30 @@ final class NetServiceTests: XCTestCase {
         } else {
             XCTFail("Expected Tun mode")
         }
+        XCTAssertEqual(elevationCalls, [true], "tunOn must actually relaunch the kernel elevated, not just flip local metadata")
         XCTAssertTrue(printed.contains(where: { $0.contains("Tun mode active.") }))
+    }
+
+    func testTunOn_elevationFails_propagatesErrorWithoutMarkingModeActive() async throws {
+        let fakeInspector = FakePortInspector(utunPresent: false, listeningProcesses: [:])
+        var appliedMode: ActiveNetworkMode = .none
+
+        let service = NetService(
+            networkMode: { appliedMode },
+            setNetworkMode: { appliedMode = $0 },
+            portInspector: fakeInspector,
+            setTunElevation: { _ in
+                throw CLIError(what: "Tun mode unavailable", cause: "sudo authentication failed", exitCode: .privilegeError)
+            }
+        )
+
+        do {
+            try await service.tunOn(yes: true)
+            XCTFail("Expected the elevation failure to propagate")
+        } catch let err as CLIError {
+            XCTAssertEqual(err.exitCode, .privilegeError)
+        }
+        XCTAssertEqual(appliedMode, .none, "must not report Tun mode active if the elevated relaunch failed")
     }
 
     func testTunOff_idempotent() async throws {
@@ -272,6 +297,25 @@ final class NetServiceTests: XCTestCase {
 
         try await service.tunOff()
         XCTAssertTrue(printed.contains(where: { $0.contains("Tun mode is not active — nothing to do.") }))
+    }
+
+    func testTunOff_active_deElevatesAndClearsMode() async throws {
+        var appliedMode: ActiveNetworkMode = .tun(interface: "utun", since: Date())
+        var printed: [String] = []
+        var elevationCalls: [Bool] = []
+
+        let service = NetService(
+            networkMode: { appliedMode },
+            setNetworkMode: { appliedMode = $0 },
+            setTunElevation: { elevationCalls.append($0) },
+            printLine: { printed.append($0) }
+        )
+
+        try await service.tunOff()
+
+        XCTAssertEqual(elevationCalls, [false])
+        XCTAssertEqual(appliedMode, .none)
+        XCTAssertTrue(printed.contains(where: { $0.contains("Tun mode disabled.") }))
     }
 
     // MARK: - Proxy Mode Tests
@@ -296,7 +340,9 @@ final class NetServiceTests: XCTestCase {
         }
     }
 
-    func testProxyModeOn_success() async throws {
+    func testProxyModeOn_success_defaultPortNoKernelPatch() async throws {
+        // No explicit --port requested (defaults to the running kernel's
+        // current mixed-port, or 7890 if no kernel) — nothing to patch.
         let fakeInspector = FakePortInspector(utunPresent: false, listeningProcesses: [:])
         var appliedMode: ActiveNetworkMode = .none
         var printed: [String] = []
@@ -304,7 +350,31 @@ final class NetServiceTests: XCTestCase {
         let service = NetService(
             networkMode: { appliedMode },
             setNetworkMode: { appliedMode = $0 },
+            runningKernel: { nil },
             portInspector: fakeInspector,
+            printLine: { printed.append($0) },
+            now: { self.fixedDate }
+        )
+
+        try await service.proxyModeOn(port: nil)
+
+        XCTAssertEqual(appliedMode, .proxyMode(port: 7890, since: self.fixedDate))
+        XCTAssertTrue(printed.contains(where: { $0.contains("Proxy mode active on port 7890.") }))
+    }
+
+    func testProxyModeOn_explicitPort_patchesRunningKernel() async throws {
+        let fakeInspector = FakePortInspector(utunPresent: false, listeningProcesses: [:])
+        let mockClient = MockNetKernelClient()
+        var appliedMode: ActiveNetworkMode = .none
+        var printed: [String] = []
+
+        let service = NetService(
+            networkMode: { appliedMode },
+            setNetworkMode: { appliedMode = $0 },
+            runningKernel: { RunningKernelState(version: "v1.19.29", pid: 1234, startedAt: self.fixedDate, controlPort: 9090, mixedPort: 7890, configPath: "/tmp/config.yaml", stdoutPath: "/tmp/out.log", stderrPath: "/tmp/err.log") },
+            controlAPICredentials: { ControlAPICredentials(port: 9090, secret: "s3cr3t") },
+            portInspector: fakeInspector,
+            clientFactory: { _ in mockClient },
             printLine: { printed.append($0) },
             now: { self.fixedDate }
         )
@@ -312,7 +382,46 @@ final class NetServiceTests: XCTestCase {
         try await service.proxyModeOn(port: 8080)
 
         XCTAssertEqual(appliedMode, .proxyMode(port: 8080, since: self.fixedDate))
+        XCTAssertEqual(mockClient.lastPatchedPort, 8080)
         XCTAssertTrue(printed.contains(where: { $0.contains("Proxy mode active on port 8080.") }))
+    }
+
+    func testProxyModeOn_explicitPort_noRunningKernel_throwsExit2() async throws {
+        let fakeInspector = FakePortInspector(utunPresent: false, listeningProcesses: [:])
+
+        let service = NetService(
+            networkMode: { .none },
+            runningKernel: { nil },
+            portInspector: fakeInspector
+        )
+
+        do {
+            try await service.proxyModeOn(port: 8080)
+            XCTFail("Expected an error when requesting an explicit port with no kernel running")
+        } catch let err as CLIError {
+            XCTAssertEqual(err.exitCode, .permissionDenied)
+        }
+    }
+
+    func testProxyModeOn_explicitPort_livenessFailure_throws() async throws {
+        let fakeInspector = FakePortInspector(utunPresent: false, listeningProcesses: [:])
+        let mockClient = MockNetKernelClient()
+        mockClient.livenessResultToReturn = .unresponsive("kernel did not respond")
+
+        let service = NetService(
+            networkMode: { .none },
+            runningKernel: { RunningKernelState(version: "v1.19.29", pid: 1234, startedAt: self.fixedDate, controlPort: 9090, mixedPort: 7890, configPath: "/tmp/config.yaml", stdoutPath: "/tmp/out.log", stderrPath: "/tmp/err.log") },
+            controlAPICredentials: { ControlAPICredentials(port: 9090, secret: "s3cr3t") },
+            portInspector: fakeInspector,
+            clientFactory: { _ in mockClient }
+        )
+
+        do {
+            try await service.proxyModeOn(port: 8080)
+            XCTFail("Expected portUnavailable when the kernel doesn't confirm the port change")
+        } catch let err as CLIError {
+            XCTAssertEqual(err.exitCode, .portUnavailable)
+        }
     }
 
     // MARK: - Mutual Exclusivity Tests
@@ -331,7 +440,8 @@ final class NetServiceTests: XCTestCase {
             networkMode: { currentMode },
             setNetworkMode: { currentMode = $0 },
             networkSetup: fakeSetup,
-            portInspector: fakeInspector
+            portInspector: fakeInspector,
+            setTunElevation: { _ in }
         )
 
         try await service.tunOn(yes: true)
@@ -394,6 +504,27 @@ private final class FakeNetworkSetup: NetworkSetupManaging {
     func setSecureWebProxy(service: String, host: String, port: Int) throws {}
     func setSecureWebProxyState(service: String, enabled: Bool) throws {
         secureWebProxyStates[service] = enabled
+    }
+}
+
+private final class MockNetKernelClient: KernelClient {
+    var lastPatchedPort: Int?
+    var livenessResultToReturn: LivenessResult = .healthy
+
+    func version() async throws -> VersionInfo { VersionInfo(version: "v1.19.29", meta: true) }
+    func getConfigs() async throws -> Configs { Configs(mode: "rule", mixedPort: lastPatchedPort ?? 7890) }
+    func patchConfigs(_ patch: ConfigsPatch) async throws {
+        if let port = patch.mixedPort {
+            self.lastPatchedPort = port
+        }
+    }
+    func getProxies() async throws -> ProxyGroups { ProxyGroups(groups: [:]) }
+    func selectProxy(group: String, node: String) async throws {}
+    func getConnections() async throws -> ConnectionsSnapshot { ConnectionsSnapshot(downloadTotal: 0, uploadTotal: 0, connections: []) }
+    func closeConnections() async throws {}
+
+    func livenessCheck(expectedVersion: String?, expectedConfigPatch: ConfigsPatch?) async throws -> LivenessResult {
+        return livenessResultToReturn
     }
 }
 

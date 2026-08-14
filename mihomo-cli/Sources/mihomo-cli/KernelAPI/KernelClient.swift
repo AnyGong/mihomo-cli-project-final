@@ -50,7 +50,16 @@ struct Configs: Decodable, Equatable {
 /// (see KernelClient.livenessCheck's config-readback sub-check).
 struct ConfigsPatch: Encodable, Equatable {
     var mode: String?
-    // TODO: other patchable fields as needed by `net`/`mode` commands
+    /// Patches the kernel's mixed-port (HTTP+SOCKS) listener, used by
+    /// `mihomo net proxy-mode on --port <N>` (§ full spec: "session-only
+    /// override, without editing the subscription file"). kebab-case on the
+    /// wire, matching `Configs.mixedPort`'s decode key.
+    var mixedPort: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case mixedPort = "mixed-port"
+    }
 }
 
 /// Decodes only what `net status`/`doctor` actually display: which node is
@@ -193,6 +202,9 @@ final class HTTPKernelClient: KernelClient {
                 let configs = try await getConfigs()
                 if let expectedMode = expectedConfigPatch.mode, configs.mode != expectedMode {
                     return .configMismatch(field: "mode", expected: expectedMode, actual: configs.mode)
+                }
+                if let expectedPort = expectedConfigPatch.mixedPort, configs.mixedPort != expectedPort {
+                    return .configMismatch(field: "mixed-port", expected: "\(expectedPort)", actual: "\(configs.mixedPort.map(String.init) ?? "nil")")
                 }
             } catch {
                 return .unresponsive(errorDescription(error))

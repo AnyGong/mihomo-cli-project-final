@@ -1,0 +1,13 @@
+{
+  "name": "mihomo-cli-project-final",
+  "private": true,
+  "description": "Not a Node package — this file exists only so editors that show a clickable ▶ next to npm scripts (VS Code's NPM SCRIPTS panel, etc.) can one-click apply/build/test/doctor this Swift CLI. The actual work happens in run-task-flow.sh.",
+  "scripts": {
+    "apply-fixes": "bash run-task-flow.sh apply",
+    "build": "bash run-task-flow.sh build",
+    "test": "bash run-task-flow.sh test",
+    "install-cli": "bash run-task-flow.sh install",
+    "doctor": "bash run-task-flow.sh doctor",
+    "verify": "bash run-task-flow.sh verify"
+  }
+}

@@ -16,6 +16,12 @@ final class NetService {
     private let portInspector: PortInspecting
     private let clientFactory: (ControlAPICredentials) -> KernelClient
     private let confirmationPrompt: (_ question: String, _ yes: Bool) throws -> PromptResult
+    /// Relaunches the running kernel elevated (`true`) or unelevated
+    /// (`false`) via `sudo`, per the hardware-confirmed Tun privilege
+    /// mechanism (docs/mihomo_tun_privilege_spike_guide.md). Defaults to
+    /// `LifecycleService.setTunElevation`. Injected so `tunOn`/`tunOff`
+    /// stay unit-testable without actually invoking `sudo`.
+    private let setTunElevation: (Bool) async throws -> Void
     private let printLine: (String) -> Void
     private let now: () -> Date
 
@@ -31,6 +37,7 @@ final class NetService {
         portInspector: PortInspecting = PortInspector(),
         clientFactory: @escaping (ControlAPICredentials) -> KernelClient = { HTTPKernelClient(port: $0.port, secret: $0.secret) },
         confirmationPrompt: @escaping (_ question: String, _ yes: Bool) throws -> PromptResult = confirm,
+        setTunElevation: @escaping (Bool) async throws -> Void = { try await LifecycleService().setTunElevation($0) },
         printLine: @escaping (String) -> Void = { print($0) },
         now: @escaping () -> Date = Date.init
     ) {
@@ -45,6 +52,7 @@ final class NetService {
         self.portInspector = portInspector
         self.clientFactory = clientFactory
         self.confirmationPrompt = confirmationPrompt
+        self.setTunElevation = setTunElevation
         self.printLine = printLine
         self.now = now
     }
@@ -263,7 +271,19 @@ final class NetService {
     // MARK: - Tun Mode On / Off
 
     func tunOn(yes: Bool) async throws {
-        return try await AdvisoryLock().withLock {
+        // NOTE ON LOCKING: this can't be a single AdvisoryLock().withLock
+        // wrapping the whole method the way the other net/mode commands
+        // are, because setTunElevation() (LifecycleService) takes its own
+        // AdvisoryLock — and AdvisoryLock is a real flock(2) held per file
+        // descriptor, so a nested acquire from the same process on the same
+        // lock file self-conflicts (immediate exit-4 "operation already in
+        // progress"), it doesn't recursively succeed. Splitting into two
+        // lock windows around the elevated relaunch avoids that; it leaves
+        // a narrow window where a second `net tun on`/`net tun off` could
+        // interleave between phases. Given this tool's single-user,
+        // single-machine scope, that's an accepted trade rather than a
+        // reason to make AdvisoryLock itself reentrant.
+        try await AdvisoryLock().withLock {
             // Deactivate any conflicting active mode (mutual exclusivity)
             try await deactivateActiveModeExcept(matching: { mode in
                 if case .tun = mode { return true }
@@ -293,25 +313,55 @@ final class NetService {
                     exitCode: .privilegeError
                 )
             }
+        }
 
+        // Actually relaunch the kernel under sudo — the hardware spike
+        // confirmed unprivileged utun creation fails, and confirming the
+        // prompt above without this would leave Tun mode "on" in the
+        // metadata store while doing nothing on the wire. Outside the lock
+        // above for the reason in the NOTE.
+        try await setTunElevation(true)
+
+        try await AdvisoryLock().withLock {
             try await setNetworkMode(.tun(interface: "utun", since: now()))
             printLine("✅ Tun mode active.")
         }
     }
 
     func tunOff() async throws {
-        return try await AdvisoryLock().withLock {
-            try await performTunOff()
+        let wasActive = try await AdvisoryLock().withLock { () -> Bool in
+            let mode = try await networkMode()
+            guard case .tun = mode else { return false }
+            return true
+        }
+
+        guard wasActive else {
+            printLine("Tun mode is not active — nothing to do.")
+            return
+        }
+
+        // Best-effort, outside the lock (see tunOn's NOTE ON LOCKING) — drop
+        // the kernel back to unprivileged. If no kernel happens to be
+        // running at all, there's nothing to de-elevate; that's not a
+        // reason to fail turning Tun mode off.
+        try? await setTunElevation(false)
+
+        try await AdvisoryLock().withLock {
+            try await setNetworkMode(.none)
+            printLine("✅ Tun mode disabled.")
         }
     }
 
-    private func performTunOff() async throws {
+    /// Lock-free variant used by `off()` and `deactivateActiveModeExcept`,
+    /// which already hold the AdvisoryLock themselves — see tunOn's NOTE ON
+    /// LOCKING for why `setTunElevation` can never be called while this
+    /// process already holds that lock.
+    private func performTunOffMetadataOnly() async throws {
         let mode = try await networkMode()
         guard case .tun = mode else {
             printLine("Tun mode is not active — nothing to do.")
             return
         }
-
         try await setNetworkMode(.none)
         printLine("✅ Tun mode disabled.")
     }
@@ -335,6 +385,46 @@ final class NetService {
                     throw CLIError(
                         what: "cannot bind port \(targetPort)",
                         cause: "already in use by another process (pid \(conflict.pid), '\(conflict.command)')",
+                        exitCode: .portUnavailable
+                    )
+                }
+            }
+
+            // If an explicit --port was requested and differs from the
+            // kernel's currently configured mixed-port, actually apply it
+            // as a runtime overlay via PATCH /configs — never by editing
+            // the subscription file (§2.4). Without this the command
+            // previously "succeeded" while leaving the kernel listening on
+            // whatever port it already had.
+            if let requestedPort, requestedPort != running?.mixedPort {
+                guard let running, let creds = try await controlAPICredentials() else {
+                    throw CLIError(
+                        what: "cannot bind port \(requestedPort)",
+                        cause: "no kernel is currently running to reconfigure",
+                        fix: "run 'mihomo kernel use <version>' or 'mihomo start' first",
+                        exitCode: .permissionDenied
+                    )
+                }
+                let client = clientFactory(creds)
+                let patch = ConfigsPatch(mixedPort: requestedPort)
+                try await client.patchConfigs(patch)
+                let liveness = try await client.livenessCheck(expectedVersion: running.version, expectedConfigPatch: patch)
+                let livenessDetail: String
+                switch liveness {
+                case .healthy:
+                    livenessDetail = ""
+                case .unresponsive(let reason):
+                    livenessDetail = reason
+                case .versionMismatch(let expected, let actual):
+                    livenessDetail = "expected version \(expected), got \(actual)"
+                case .configMismatch(let field, let expected, let actual):
+                    livenessDetail = "\(field) expected \(expected), got \(actual)"
+                }
+                guard case .healthy = liveness else {
+                    throw CLIError(
+                        what: "cannot bind port \(requestedPort)",
+                        cause: "kernel did not confirm the mixed-port change (\(livenessDetail))",
+                        fix: "run 'mihomo log --level error' for the kernel's stderr output",
                         exitCode: .portUnavailable
                     )
                 }
@@ -365,16 +455,25 @@ final class NetService {
     // MARK: - Deactivate All / Off Convenience
 
     func off() async throws {
-        return try await AdvisoryLock().withLock {
-            let mode = try await networkMode()
-            switch mode {
-            case .none:
-                printLine("No network mode is currently active — nothing to do.")
-            case .systemProxy:
+        let mode = try await AdvisoryLock().withLock {
+            try await networkMode()
+        }
+
+        switch mode {
+        case .none:
+            printLine("No network mode is currently active — nothing to do.")
+        case .systemProxy:
+            try await AdvisoryLock().withLock {
                 try await performSystemProxyOff(yes: true)
-            case .tun:
-                try await performTunOff()
-            case .proxyMode:
+            }
+        case .tun:
+            // Outside any lock — see tunOn's NOTE ON LOCKING.
+            try? await setTunElevation(false)
+            try await AdvisoryLock().withLock {
+                try await performTunOffMetadataOnly()
+            }
+        case .proxyMode:
+            try await AdvisoryLock().withLock {
                 try await performProxyModeOff()
             }
         }
@@ -382,6 +481,22 @@ final class NetService {
 
     // MARK: - Private Helpers
 
+    /// Deactivates whichever mode is currently active, if it isn't already
+    /// the mode being switched to. Note: for the `.tun` case this only
+    /// clears local metadata — it does NOT call `setTunElevation(false)` to
+    /// drop the kernel back to unprivileged, because every caller of this
+    /// method (`tunOn`, `systemProxyOn`, `proxyModeOn`) already holds the
+    /// AdvisoryLock, and `setTunElevation` cannot be called while that lock
+    /// is held (see tunOn's NOTE ON LOCKING). Practical effect: switching
+    /// directly from Tun mode to System Proxy or Proxy Mode (without an
+    /// explicit `net tun off` first) leaves the kernel process running
+    /// elevated even though Tun mode is no longer the active mode. That's
+    /// not a functional break — the kernel still serves the newly-active
+    /// mode correctly — but it's an unnecessary elevated process. Calling
+    /// `net tun off` explicitly before switching modes avoids it. Fully
+    /// closing this gap would mean restructuring every one of this
+    /// function's callers into the same two-phase lock pattern `tunOn`/
+    /// `tunOff` use; tracked as a follow-up rather than done here.
     private func deactivateActiveModeExcept(matching isSameMode: (ActiveNetworkMode) -> Bool) async throws {
         let current = try await networkMode()
         if current != .none && !isSameMode(current) {

@@ -33,6 +33,9 @@ final class DoctorServiceTests: XCTestCase {
             networkSetup: FakeDoctorNetworkSetup(proxies: [:]),
             portInspector: FakeDoctorPortInspector(portBusy: false),
             launchdManager: FakeDoctorLaunchd(installed: false),
+            tunPrivilege: FakeDoctorTunPrivilege(entitled: true),
+            logDirectory: tempDir,
+            minimumFreeBytes: 0,
             printLine: { printed.append($0) }
         )
 
@@ -41,7 +44,61 @@ final class DoctorServiceTests: XCTestCase {
         XCTAssertTrue(printed.contains(where: { $0.contains("Kernel binary present") && $0.contains("passed (v1.19.10)") }))
         XCTAssertTrue(printed.contains(where: { $0.contains("Subscription validity") && $0.contains("passed (work-vpn)") }))
         XCTAssertTrue(printed.contains(where: { $0.contains("Port 7890 availability") && $0.contains("free") }))
+        XCTAssertTrue(printed.contains(where: { $0.contains("Tun entitlement") && $0.contains("granted") }))
+        XCTAssertTrue(printed.contains(where: { $0.contains("Disk / log headroom") && $0.contains("ok") }))
         XCTAssertTrue(printed.contains(where: { $0.contains("All 7 diagnostic checks passed with 0 warnings.") }))
+    }
+
+    func testDoctor_tunNotEntitled_reportsWarning() async throws {
+        var printed: [String] = []
+        let activeK = KernelRecord(version: "1.19.10", binaryPath: validBinary.path, addedAt: Date(), isActive: true)
+        let activeS = SubscriptionRecord(name: "work-vpn", source: .local(path: "/tmp/sub.yaml"), addedAt: Date(), updatedAt: Date(), isActive: true)
+
+        let service = DoctorService(
+            activeKernel: { activeK },
+            activeSubscription: { activeS },
+            networkMode: { .none },
+            daemonState: { DaemonState(installed: false) },
+            runningKernel: { nil },
+            networkSetup: FakeDoctorNetworkSetup(proxies: [:]),
+            portInspector: FakeDoctorPortInspector(portBusy: false),
+            launchdManager: FakeDoctorLaunchd(installed: false),
+            tunPrivilege: FakeDoctorTunPrivilege(entitled: false),
+            logDirectory: tempDir,
+            minimumFreeBytes: 0,
+            printLine: { printed.append($0) }
+        )
+
+        try await service.run(json: false)
+
+        XCTAssertTrue(printed.contains(where: { $0.contains("Tun entitlement") && $0.contains("not currently usable") }))
+        XCTAssertTrue(printed.contains(where: { $0.contains("1 warning found:") }))
+    }
+
+    func testDoctor_lowDiskHeadroom_reportsWarning() async throws {
+        var printed: [String] = []
+        let activeK = KernelRecord(version: "1.19.10", binaryPath: validBinary.path, addedAt: Date(), isActive: true)
+        let activeS = SubscriptionRecord(name: "work-vpn", source: .local(path: "/tmp/sub.yaml"), addedAt: Date(), updatedAt: Date(), isActive: true)
+
+        let service = DoctorService(
+            activeKernel: { activeK },
+            activeSubscription: { activeS },
+            networkMode: { .none },
+            daemonState: { DaemonState(installed: false) },
+            runningKernel: { nil },
+            networkSetup: FakeDoctorNetworkSetup(proxies: [:]),
+            portInspector: FakeDoctorPortInspector(portBusy: false),
+            launchdManager: FakeDoctorLaunchd(installed: false),
+            tunPrivilege: FakeDoctorTunPrivilege(entitled: true),
+            logDirectory: tempDir,
+            minimumFreeBytes: Int64.max, // forces the real free-space reading to always look "low"
+            printLine: { printed.append($0) }
+        )
+
+        try await service.run(json: false)
+
+        XCTAssertTrue(printed.contains(where: { $0.contains("Disk / log headroom") && $0.contains("low") }))
+        XCTAssertTrue(printed.contains(where: { $0.contains("1 warning found:") }))
     }
 
     func testDoctor_warningsDetected_reportsSummaryWithoutFailing() async throws {
@@ -58,6 +115,9 @@ final class DoctorServiceTests: XCTestCase {
             networkSetup: FakeDoctorNetworkSetup(proxies: [:]),
             portInspector: FakeDoctorPortInspector(portBusy: true),
             launchdManager: FakeDoctorLaunchd(installed: false),
+            tunPrivilege: FakeDoctorTunPrivilege(entitled: true),
+            logDirectory: tempDir,
+            minimumFreeBytes: 0,
             printLine: { printed.append($0) }
         )
 
@@ -81,6 +141,9 @@ final class DoctorServiceTests: XCTestCase {
             networkSetup: FakeDoctorNetworkSetup(proxies: [:]),
             portInspector: FakeDoctorPortInspector(portBusy: false),
             launchdManager: FakeDoctorLaunchd(installed: false),
+            tunPrivilege: FakeDoctorTunPrivilege(entitled: true),
+            logDirectory: tempDir,
+            minimumFreeBytes: 0,
             printLine: { printed.append($0) }
         )
 
@@ -138,4 +201,11 @@ private final class FakeDoctorLaunchd: LaunchdManaging {
     func removePlist() throws {}
     func bootstrap() throws {}
     func bootout() throws {}
+}
+
+private final class FakeDoctorTunPrivilege: TunPrivilegeManaging {
+    let entitled: Bool
+    init(entitled: Bool) { self.entitled = entitled }
+    func hasEntitlement() -> Bool { entitled }
+    func acquireEntitlement() throws {}
 }
