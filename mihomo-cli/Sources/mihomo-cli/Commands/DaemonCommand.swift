@@ -8,7 +8,7 @@ struct DaemonCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "daemon",
         abstract: "Manage the launchd supervision agent.",
-        subcommands: [Install.self, Remove.self, Status.self]
+        subcommands: [Install.self, Remove.self, Status.self, Supervise.self]
     )
 
     struct Install: AsyncParsableCommand {
@@ -41,6 +41,23 @@ struct DaemonCommand: AsyncParsableCommand {
 
         func run() async throws {
             try await DaemonService().status(json: json)
+        }
+    }
+
+    /// Internal — this is what the generated launchd plist actually
+    /// launches now (see `DaemonService.generatePlist`), not something a
+    /// person runs directly. `shouldDisplay: false` keeps it out of
+    /// `mihomo daemon --help`. Runs `DaemonSupervisor.run()`, which loops
+    /// forever polling and relaunching the kernel — this is the fix for
+    /// "daemon does not restart kernel when killed": launchd's `KeepAlive`
+    /// now watches this long-running process instead of the one-shot
+    /// `mihomo start`, which always exited 0 after merely spawning the
+    /// kernel and detaching from it.
+    struct Supervise: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName: "_supervise", shouldDisplay: false)
+
+        func run() async throws {
+            await DaemonSupervisor().run()
         }
     }
 }

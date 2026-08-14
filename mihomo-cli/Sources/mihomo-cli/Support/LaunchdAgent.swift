@@ -80,6 +80,15 @@ final class DaemonService {
 
     // MARK: - Plist Generation
 
+    /// `ProgramArguments` launches `daemon _supervise` (`DaemonSupervisor`),
+    /// not `start`. `start` spawns the kernel in the background and then
+    /// exits 0 — with `KeepAlive.SuccessfulExit: false`, launchd was only
+    /// ever watching that one-shot command, which "succeeded" the instant
+    /// the kernel was spawned; it never noticed the kernel dying afterward.
+    /// `daemon _supervise` is a long-running loop, so `KeepAlive` now
+    /// applies to something that keeps running for as long as supervision
+    /// should last, and actually restarts the kernel on unexpected exit
+    /// (see `DaemonSupervisor`).
     static func generatePlist(executablePath: String, logDir: String) -> String {
         """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -91,7 +100,8 @@ final class DaemonService {
             <key>ProgramArguments</key>
             <array>
                 <string>\(executablePath)</string>
-                <string>start</string>
+                <string>daemon</string>
+                <string>_supervise</string>
             </array>
             <key>RunAtLoad</key>
             <true/>
