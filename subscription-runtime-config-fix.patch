@@ -1,0 +1,608 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1cc154f..19cb008 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -454,3 +454,24 @@ Manual QA on the Mac Mini surfaced `mihomo-cli net tun on` failing every time wi
+ **Also noted, not yet fixed (pre-existing, unrelated to this bug):** the same session's manual QA also showed `kernel use <already-active-version>` reporting "already the active kernel, nothing to do" while `ps aux` showed no such process running at all — i.e. the metadata store's "active" pointer had gone stale relative to the real process state (most likely from earlier testing sessions). `kernel use`'s no-op fast path only compares against the *stored* active-version pointer, never against whether a process is actually alive. This is worth a follow-up: either `kernel use`'s no-op check or `kernel status`/`doctor` should cross-check `MetadataStore.runningKernel()` + `ProcessController.isRunning(pid:)`, not just the active-kernel record, before declaring "nothing to do" (`kernel status` already does this cross-check for its own display — see `KernelStatusService.swift` — but `kernel use`'s no-op path does not; the two were implemented against different assumptions and should be reconciled).
+ 
+ **Testing:** `Tests/mihomo-cliTests/PortInspectorTests.swift` (new, 9 unit tests) — idle-Mac false-positive shape (UP slots with only link-local IPv6) reports no collision; live VPN with IPv4 tunnel address reports a collision; live VPN with a routable (non-link-local) IPv6 address reports a collision; `UP` with no address at all does not; a matching address on a `DOWN` interface does not; non-`utun` interfaces with real addresses never count; empty output; plus two smoke tests for the pre-existing `lsof` parser, which had no dedicated test file before. **Not yet re-verified on the real Mac Mini** — the original report came from hardware, but this fix has only been reasoned through and unit-tested against captured `ifconfig -a` output shapes, not run against `swift test` (no Swift toolchain in this sandbox environment); re-running `net tun on` on the actual machine remains the real confirmation.
++
++## 28. Bugfix — `sub add local` (and every kernel launch) silently dropped `proxy-providers`/subscription content entirely
++
++**Reported symptom:** importing a full mihomo config via `sub add local` that uses `proxy-providers` (and no top-level `proxies` list) was accepted without error, but the kernel started with an empty runtime config — `proxies: []`, `proxy-groups: []` — and `proxy-providers` was completely absent from it. `curl -x http://127.0.0.1:7890 ...` failed because there was nothing to proxy through.
++
++**Root cause:** this had nothing to do with `proxy-providers` specifically, and nothing to do with `sub add local`'s import/validation step (which already accepts such a config correctly — `SubscriptionValidator` has no opinion on `proxy-providers` either way). The actual bug: **the two code paths that actually launch a kernel process — `KernelUseService.launch()` (used by `kernel use`) and `LifecycleService.performStart()` (used by `start`/`restart`/Tun-mode elevation relaunches) — never loaded the active subscription's content at all.** Both called `RuntimeConfigWriter.write(version:credentials:mixedPort:)`, the convenience overload that defaults `subscriptionYAML` to `nil`, which unconditionally falls back to the hardcoded empty passthrough template (`proxies: []`, `proxy-groups: []`, `rules: [MATCH,DIRECT]`) regardless of what subscription was active. This reproduces identically for a config with a plain `proxies:` list too — it isn't a proxy-providers-specific reduction, it's the active subscription being ignored outright at launch time.
++
++The only two places that ever passed real subscription content into `RuntimeConfigWriter` were `SubscriptionService.use()` (`sub use`) and `SubscriptionService.refresh()` (`sub refresh`) — and only in the branch where a kernel was *already running*, i.e. hot-patching a live kernel's config over the control API's config-reload path. A subscription activated via `sub use` *before* any kernel was running, then started via `kernel use`/`start`, never got its content applied at all.
++
++`RuntimeConfigWriter` itself was not the bug — its merge logic (load the full subscription YAML as a dictionary, overlay `mixed-port`/`external-controller`/`secret`/`mode`, re-dump the whole dictionary) already preserves arbitrary top-level keys like `proxy-providers` correctly; it just was never being given real content to merge on a fresh launch.
++
++**Fix:**
++- New `Support/SubscriptionContentLoader.swift` — factors the local-vs-remote subscription path resolution and file-loading logic (previously private, duplicated implicitly wherever it might be needed) out of `SubscriptionService` into a shared, reusable helper. `SubscriptionService.loadContent(for:)`/`destinationURL(for:)` are now thin wrappers around it (no behavior change there).
++- `KernelUseService` and `LifecycleService` each gained a new injectable `activeSubscriptionContent: () async throws -> String?` dependency (default implementation reads `MetadataStore.shared.activeSubscription()` and loads its file via `SubscriptionContentLoader`, returning `nil` if no subscription is active). Both `launch()` (used by `kernel use`, including its own rollback-relaunch path) and `performStart()` (used by `start`, `restart`, and `setTunElevation`'s relaunch) now call this and pass the result as `subscriptionYAML` to `configWriter.write(...)`, instead of always passing `nil`.
++- No changes to `RuntimeConfigWriter`'s merge logic itself, and no changes to `sub use`/`sub refresh`'s already-correct hot-patch behavior.
++
++**Testing:**
++- `Tests/mihomo-cliTests/RuntimeConfigWriterTests.swift` (new, 5 tests) — exercises the real `RuntimeConfigWriter` against a temp directory and parses the written `config.yaml` back with Yams to assert on it directly: a `proxy-providers`-only config (the exact bug report repro) preserves `proxy-providers`, its real `proxy-groups`, and its real `rules`, none of which get replaced by the empty fallback; a plain `proxies:`-list subscription still works as before; no active subscription still produces the empty passthrough config (and, notably, no fabricated `proxy-providers` key); `modeOverride` takes precedence over an embedded `mode:`, and the embedded `mode:` is used when no override is given.
++- `KernelUseServiceTests.swift` (+2 tests) and `LifecycleServiceTests.swift` (+1 test) — regression guards asserting `activeSubscriptionContent()`'s return value actually reaches the config writer's `subscriptionYAML` parameter on both launch paths (and that "no active subscription" correctly passes `nil`, not silently erroring).
++- `Package.swift`: the test target now also depends on the `Yams` product (previously only the executable target did), needed for `RuntimeConfigWriterTests` to parse written YAML back into a dictionary for direct assertions rather than string-matching.
++- **Not yet run against `swift test` on real hardware** — same caveat as the utun fix above: no Swift toolchain in this sandbox. The reasoning and test expectations were traced by hand against the actual `RuntimeConfigWriter`/`KernelUseService`/`LifecycleService` source, but this needs a real `swift test` run (and ideally a real `sub add local` + `proxy-providers` repro end-to-end) to confirm.
+diff --git a/mihomo-cli/Package.swift b/mihomo-cli/Package.swift
+index 9c01746..012ef96 100644
+--- a/mihomo-cli/Package.swift
++++ b/mihomo-cli/Package.swift
+@@ -33,7 +33,14 @@ let package = Package(
+         ),
+         .testTarget(
+             name: "mihomo-cliTests",
+-            dependencies: ["mihomo-cli"],
++            dependencies: [
++                "mihomo-cli",
++                // Needed so tests can parse written config.yaml output back
++                // into a dictionary to assert on it directly (see
++                // RuntimeConfigWriterTests) rather than string-matching —
++                // previously only the executable target could `import Yams`.
++                .product(name: "Yams", package: "Yams"),
++            ],
+             path: "Tests/mihomo-cliTests",
+             resources: [
+                 .copy("Fixtures")
+diff --git a/mihomo-cli/Sources/mihomo-cli/Support/KernelUseService.swift b/mihomo-cli/Sources/mihomo-cli/Support/KernelUseService.swift
+index 96a32bb..b934f73 100644
+--- a/mihomo-cli/Sources/mihomo-cli/Support/KernelUseService.swift
++++ b/mihomo-cli/Sources/mihomo-cli/Support/KernelUseService.swift
+@@ -24,6 +24,13 @@ final class KernelUseService {
+     private let regenerateCredentials: (Int) async throws -> ControlAPICredentials
+     private let markStopExpected: () async throws -> Void
+     private let markStartObserved: () async throws -> Void
++    /// Loads the currently active subscription's raw YAML (nil if none is
++    /// active) so it actually reaches the runtime config the kernel is
++    /// launched with — previously `launch()` never called this at all,
++    /// always writing the hardcoded empty passthrough config regardless of
++    /// what subscription was active (silently dropping `proxy-providers`,
++    /// `proxy-groups`, custom `rules`, etc.). See `SubscriptionContentLoader`.
++    private let activeSubscriptionContent: () async throws -> String?
+     private let configWriter: RuntimeConfigWriting
+     private let processController: KernelProcessControlling
+     private let portChecker: PortChecking
+@@ -43,6 +50,13 @@ final class KernelUseService {
+         regenerateCredentials: @escaping (Int) async throws -> ControlAPICredentials = { try MetadataStore.shared.regenerateControlAPICredentials(port: $0) },
+         markStopExpected: @escaping () async throws -> Void = { try MetadataStore.shared.markKernelStopExpected() },
+         markStartObserved: @escaping () async throws -> Void = { try MetadataStore.shared.markKernelStartObserved() },
++        activeSubscriptionContent: @escaping () async throws -> String? = {
++            guard let sub = try await MetadataStore.shared.activeSubscription() else { return nil }
++            return try SubscriptionContentLoader.loadContent(
++                for: sub,
++                subscriptionsDirectory: URL(fileURLWithPath: "\(NSHomeDirectory())/.mihomo-cli/subscriptions")
++            )
++        },
+         configWriter: RuntimeConfigWriting = RuntimeConfigWriter(),
+         processController: KernelProcessControlling = ProcessController(),
+         portChecker: PortChecking = LoopbackPortChecker(),
+@@ -61,6 +75,7 @@ final class KernelUseService {
+         self.regenerateCredentials = regenerateCredentials
+         self.markStopExpected = markStopExpected
+         self.markStartObserved = markStartObserved
++        self.activeSubscriptionContent = activeSubscriptionContent
+         self.configWriter = configWriter
+         self.processController = processController
+         self.portChecker = portChecker
+@@ -122,7 +137,14 @@ final class KernelUseService {
+     private func launch(record: KernelRecord, replacing previousRunning: RunningKernelState?) async throws -> KernelLaunchContext {
+         let selectedControlPort = try await preparePortsAndStopPrevious(previousRunning)
+         let credentials = try await regenerateCredentials(selectedControlPort)
+-        let runtimeConfig = try configWriter.write(version: record.version, credentials: credentials, mixedPort: mixedPort)
++        let subscriptionYAML = try await activeSubscriptionContent()
++        let runtimeConfig = try configWriter.write(
++            version: record.version,
++            credentials: credentials,
++            mixedPort: mixedPort,
++            subscriptionYAML: subscriptionYAML,
++            modeOverride: nil
++        )
+         let stdoutURL = logDirectory.appendingPathComponent("kernel-\(record.version)-stdout.log")
+         let stderrURL = logDirectory.appendingPathComponent("kernel-\(record.version)-stderr.log")
+         let launched = try processController.start(KernelLaunchRequest(
+diff --git a/mihomo-cli/Sources/mihomo-cli/Support/LifecycleService.swift b/mihomo-cli/Sources/mihomo-cli/Support/LifecycleService.swift
+index 58ed252..c332fc9 100644
+--- a/mihomo-cli/Sources/mihomo-cli/Support/LifecycleService.swift
++++ b/mihomo-cli/Sources/mihomo-cli/Support/LifecycleService.swift
+@@ -16,6 +16,14 @@ final class LifecycleService {
+     /// was never told to bind to that port/secret at all, since (see
+     /// `configWriter` below) no config file was ever written either.
+     private let regenerateCredentials: (Int) async throws -> ControlAPICredentials
++    /// Loads the currently active subscription's raw YAML (nil if none is
++    /// active). `performStart` previously never called this at all — every
++    /// `start`/`restart`/Tun-elevation relaunch wrote the hardcoded empty
++    /// passthrough config regardless of what subscription was active,
++    /// silently dropping `proxy-providers`, `proxy-groups`, custom `rules`,
++    /// etc. See `SubscriptionContentLoader` and the mirrored fix in
++    /// `KernelUseService`.
++    private let activeSubscriptionContent: () async throws -> String?
+     private let clientFactory: (ControlAPICredentials) -> KernelClient
+     /// Writes the actual runtime `config.yaml` the spawned kernel process
+     /// reads via `-f <path>`. This was the root cause of `start`/`restart`
+@@ -61,6 +69,13 @@ final class LifecycleService {
+         markKernelStartObserved: @escaping () async throws -> Void = { try await MetadataStore.shared.markKernelStartObserved() },
+         controlAPICredentials: @escaping () async throws -> ControlAPICredentials? = { try await MetadataStore.shared.controlAPICredentials() },
+         regenerateCredentials: @escaping (Int) async throws -> ControlAPICredentials = { try MetadataStore.shared.regenerateControlAPICredentials(port: $0) },
++        activeSubscriptionContent: @escaping () async throws -> String? = {
++            guard let sub = try await MetadataStore.shared.activeSubscription() else { return nil }
++            return try SubscriptionContentLoader.loadContent(
++                for: sub,
++                subscriptionsDirectory: URL(fileURLWithPath: "\(NSHomeDirectory())/.mihomo-cli/subscriptions")
++            )
++        },
+         clientFactory: @escaping (ControlAPICredentials) -> KernelClient = { HTTPKernelClient(port: $0.port, secret: $0.secret) },
+         configWriter: RuntimeConfigWriting = RuntimeConfigWriter(),
+         controlPort: Int = 9090,
+@@ -128,6 +143,7 @@ final class LifecycleService {
+         self.markKernelStartObserved = markKernelStartObserved
+         self.controlAPICredentials = controlAPICredentials
+         self.regenerateCredentials = regenerateCredentials
++        self.activeSubscriptionContent = activeSubscriptionContent
+         self.clientFactory = clientFactory
+         self.configWriter = configWriter
+         self.controlPort = controlPort
+@@ -207,7 +223,14 @@ final class LifecycleService {
+         // "-f <path>" — see the configWriter/regenerateCredentials doc
+         // comments above for why this step was missing entirely before.
+         let selectedCredentials = try await regenerateCredentials(controlPort)
+-        let runtimeConfig = try configWriter.write(version: targetKernel.version, credentials: selectedCredentials, mixedPort: mixedPort)
++        let subscriptionYAML = try await activeSubscriptionContent()
++        let runtimeConfig = try configWriter.write(
++            version: targetKernel.version,
++            credentials: selectedCredentials,
++            mixedPort: mixedPort,
++            subscriptionYAML: subscriptionYAML,
++            modeOverride: nil
++        )
+ 
+         let runDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".mihomo-cli/run")
+         try? FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+diff --git a/mihomo-cli/Sources/mihomo-cli/Support/SubscriptionContentLoader.swift b/mihomo-cli/Sources/mihomo-cli/Support/SubscriptionContentLoader.swift
+new file mode 100644
+index 0000000..75e5131
+--- /dev/null
++++ b/mihomo-cli/Sources/mihomo-cli/Support/SubscriptionContentLoader.swift
+@@ -0,0 +1,61 @@
++import Foundation
++
++/// Resolves the on-disk path for a subscription and loads its raw YAML
++/// content. Previously this logic lived only as private helpers inside
++/// `SubscriptionService` (`destinationURL(for:)` / `loadContent(for:)`).
++/// Factored out so the kernel-launch paths (`KernelUseService`,
++/// `LifecycleService`) can load the *active* subscription's content too —
++/// they previously never did, which meant every kernel launch wrote the
++/// hardcoded empty passthrough config (`proxies: []`, `proxy-groups: []`)
++/// regardless of what subscription was active, silently ignoring
++/// `proxy-providers`, `proxy-groups`, custom `rules`, etc. from the real
++/// subscription file. Only `sub use`/`sub refresh` (switching subscriptions
++/// on an *already-running* kernel) ever passed real content through.
++enum SubscriptionContentLoader {
++    static func destinationURL(for name: String, in subscriptionsDirectory: URL) -> URL {
++        let safeName = name.replacingOccurrences(of: "/", with: "_")
++        return subscriptionsDirectory.appendingPathComponent("\(safeName).yaml")
++    }
++
++    /// The on-disk path for a subscription record: the file itself for a
++    /// local import, or the managed copy under `subscriptionsDirectory` for
++    /// a remote one.
++    static func path(for record: SubscriptionRecord, subscriptionsDirectory: URL) -> String {
++        switch record.source {
++        case .local(let p):
++            return p
++        case .remote:
++            return destinationURL(for: record.name, in: subscriptionsDirectory).path
++        }
++    }
++
++    /// Loads a subscription's raw YAML text. Throws (rather than silently
++    /// falling back to an empty config) if the file is missing or unreadable
++    /// — a kernel launched with the wrong config silently is worse than a
++    /// clear error.
++    static func loadContent(
++        for record: SubscriptionRecord,
++        subscriptionsDirectory: URL,
++        fileManager: FileManager = .default
++    ) throws -> String {
++        let path = path(for: record, subscriptionsDirectory: subscriptionsDirectory)
++
++        guard fileManager.fileExists(atPath: path) else {
++            throw CLIError(
++                what: "subscription file not found",
++                cause: "file at '\(path)' does not exist",
++                exitCode: .notFound
++            )
++        }
++
++        do {
++            return try String(contentsOfFile: path, encoding: .utf8)
++        } catch {
++            throw CLIError(
++                what: "could not read subscription file",
++                cause: error.localizedDescription,
++                exitCode: .permissionDenied
++            )
++        }
++    }
++}
+diff --git a/mihomo-cli/Sources/mihomo-cli/Support/SubscriptionService.swift b/mihomo-cli/Sources/mihomo-cli/Support/SubscriptionService.swift
+index 9bd482d..61c5e1e 100644
+--- a/mihomo-cli/Sources/mihomo-cli/Support/SubscriptionService.swift
++++ b/mihomo-cli/Sources/mihomo-cli/Support/SubscriptionService.swift
+@@ -572,36 +572,15 @@ final class SubscriptionService {
+     // MARK: - Private Helpers
+ 
+     private func loadContent(for record: SubscriptionRecord) throws -> String {
+-        let path: String
+-        switch record.source {
+-        case .local(let p):
+-            path = p
+-        case .remote:
+-            path = destinationURL(for: record.name).path
+-        }
+-
+-        guard fileManager.fileExists(atPath: path) else {
+-            throw CLIError(
+-                what: "subscription file not found",
+-                cause: "file at '\(path)' does not exist",
+-                exitCode: .notFound
+-            )
+-        }
+-
+-        do {
+-            return try String(contentsOfFile: path, encoding: .utf8)
+-        } catch {
+-            throw CLIError(
+-                what: "could not read subscription file",
+-                cause: error.localizedDescription,
+-                exitCode: .permissionDenied
+-            )
+-        }
++        try SubscriptionContentLoader.loadContent(
++            for: record,
++            subscriptionsDirectory: subscriptionsDirectory,
++            fileManager: fileManager
++        )
+     }
+ 
+     private func destinationURL(for name: String) -> URL {
+-        let safeName = name.replacingOccurrences(of: "/", with: "_")
+-        return subscriptionsDirectory.appendingPathComponent("\(safeName).yaml")
++        SubscriptionContentLoader.destinationURL(for: name, in: subscriptionsDirectory)
+     }
+ 
+     private func ensureSubscriptionsDirectoryExists() throws {
+diff --git a/mihomo-cli/Tests/mihomo-cliTests/KernelUseServiceTests.swift b/mihomo-cli/Tests/mihomo-cliTests/KernelUseServiceTests.swift
+index b4197f0..1ee38b7 100644
+--- a/mihomo-cli/Tests/mihomo-cliTests/KernelUseServiceTests.swift
++++ b/mihomo-cli/Tests/mihomo-cliTests/KernelUseServiceTests.swift
+@@ -65,6 +65,50 @@ final class KernelUseServiceTests: XCTestCase {
+         XCTAssertEqual(marker.count, 1)
+     }
+ 
++    func testLaunchLoadsActiveSubscriptionContentIntoRuntimeConfig() async throws {
++        // Regression test: `launch()` previously never called
++        // `activeSubscriptionContent` at all, so the runtime config was
++        // always written with `subscriptionYAML: nil` regardless of what
++        // subscription was active — silently dropping proxy-providers,
++        // proxy-groups, and rules from the real subscription file.
++        let process = FakeProcessController()
++        let writer = FakeConfigWriter(configURL: tempDir.appendingPathComponent("config.yaml"), workDirectory: tempDir)
++        let target = try makeKernel(version: "v2")
++        let subscriptionYAML = "proxy-providers:\n  p1:\n    type: http\n    url: https://example.com\n"
++
++        let service = makeService(
++            target: target,
++            activeResponses: [nil, nil],
++            writer: writer,
++            process: process,
++            activeSubscriptionContent: { subscriptionYAML },
++            clientFactory: { _ in FakeKernelClient(result: .healthy) }
++        )
++
++        _ = try await service.use(version: "v2")
++
++        XCTAssertEqual(writer.subscriptionYAMLCalls, [subscriptionYAML])
++    }
++
++    func testLaunchWithNoActiveSubscriptionPassesNil() async throws {
++        let process = FakeProcessController()
++        let writer = FakeConfigWriter(configURL: tempDir.appendingPathComponent("config.yaml"), workDirectory: tempDir)
++        let target = try makeKernel(version: "v2")
++
++        let service = makeService(
++            target: target,
++            activeResponses: [nil, nil],
++            writer: writer,
++            process: process,
++            activeSubscriptionContent: { nil },
++            clientFactory: { _ in FakeKernelClient(result: .healthy) }
++        )
++
++        _ = try await service.use(version: "v2")
++
++        XCTAssertEqual(writer.subscriptionYAMLCalls, [nil])
++    }
++
+     func testPreviousRunningKernelIsMarkedExpectedStoppedAndPortsWaitedBeforeStart() async throws {
+         let process = FakeProcessController(runningPIDs: [11])
+         let ports = FakePortChecker()
+@@ -149,6 +193,7 @@ final class KernelUseServiceTests: XCTestCase {
+         ports: FakePortChecker = FakePortChecker(),
+         markStopExpected: @escaping () async throws -> Void = {},
+         markStartObserved: @escaping () async throws -> Void = {},
++        activeSubscriptionContent: @escaping () async throws -> String? = { nil },
+         clientFactory: @escaping (ControlAPICredentials) -> KernelClient = { _ in FakeKernelClient(result: .healthy) }
+     ) -> KernelUseService {
+         let active = ActiveKernelBox(activeResponses)
+@@ -174,6 +219,7 @@ final class KernelUseServiceTests: XCTestCase {
+             },
+             markStopExpected: markStopExpected,
+             markStartObserved: markStartObserved,
++            activeSubscriptionContent: activeSubscriptionContent,
+             configWriter: writer ?? FakeConfigWriter(configURL: tempDir.appendingPathComponent("config.yaml"), workDirectory: tempDir),
+             processController: process,
+             portChecker: ports,
+@@ -224,6 +270,10 @@ private final class FakeConfigWriter: RuntimeConfigWriting {
+     let configURL: URL
+     let workDirectory: URL
+     private(set) var credentials: ControlAPICredentials?
++    /// Every `subscriptionYAML` this writer was called with, in order —
++    /// regression guard for the bug where `launch()` never loaded the
++    /// active subscription at all and always passed `nil`.
++    private(set) var subscriptionYAMLCalls: [String?] = []
+ 
+     init(configURL: URL, workDirectory: URL) {
+         self.configURL = configURL
+@@ -238,6 +288,7 @@ private final class FakeConfigWriter: RuntimeConfigWriting {
+         modeOverride: String? = nil
+     ) throws -> RuntimeConfig {
+         self.credentials = credentials
++        subscriptionYAMLCalls.append(subscriptionYAML)
+         return RuntimeConfig(configURL: configURL, workDirectory: workDirectory)
+     }
+ }
+diff --git a/mihomo-cli/Tests/mihomo-cliTests/LifecycleServiceTests.swift b/mihomo-cli/Tests/mihomo-cliTests/LifecycleServiceTests.swift
+index 7b31464..3a6b27a 100644
+--- a/mihomo-cli/Tests/mihomo-cliTests/LifecycleServiceTests.swift
++++ b/mihomo-cli/Tests/mihomo-cliTests/LifecycleServiceTests.swift
+@@ -105,6 +105,34 @@ final class LifecycleServiceTests: XCTestCase {
+         XCTAssertTrue(printed.contains(where: { $0.contains("Started mihomo v1.19.10 (pid 5555)") }))
+     }
+ 
++    func testStart_loadsActiveSubscriptionContentIntoRuntimeConfig() async throws {
++        // Regression test: `performStart` previously never called
++        // `activeSubscriptionContent` at all, so `start`/`restart` always
++        // wrote the runtime config with `subscriptionYAML: nil` regardless
++        // of what subscription was active — silently dropping
++        // proxy-providers, proxy-groups, and rules from the real file.
++        let record = KernelRecord(version: "1.19.10", binaryPath: dummyBinary.path, addedAt: Date(), isActive: true)
++        let subscriptionYAML = "proxy-providers:\n  p1:\n    type: http\n    url: https://example.com\n"
++        let writer = FakeLifecycleConfigWriter()
++
++        let service = LifecycleService(
++            logger: testLogger,
++            runningKernel: { nil },
++            setRunningKernel: { _ in },
++            activeKernel: { record },
++            markKernelStartObserved: {},
++            regenerateCredentials: { port in ControlAPICredentials(port: port, secret: "test-secret") },
++            activeSubscriptionContent: { subscriptionYAML },
++            clientFactory: { _ in FakeLifecycleKernelClient(result: .healthy) },
++            configWriter: writer,
++            processSpawner: { _, _, _, _, _ in 5555 }
++        )
++
++        try await service.start(version: nil)
++
++        XCTAssertEqual(writer.subscriptionYAMLCalls, [subscriptionYAML])
++    }
++
+     func testStop_notRunning_throwsExit2() async throws {
+         let service = LifecycleService(
+             logger: testLogger,
+@@ -250,6 +278,11 @@ private final class FakeLifecycleTunPrivilege: TunPrivilegeManaging {
+ /// that performStart actually calls a config writer (previously it never
+ /// did, which was itself the bug being fixed here).
+ private final class FakeLifecycleConfigWriter: RuntimeConfigWriting {
++    /// Every `subscriptionYAML` this writer was called with, in order —
++    /// regression guard for the bug where `performStart` never loaded the
++    /// active subscription at all and always passed `nil`.
++    private(set) var subscriptionYAMLCalls: [String?] = []
++
+     func write(
+         version: String,
+         credentials: ControlAPICredentials,
+@@ -257,7 +290,8 @@ private final class FakeLifecycleConfigWriter: RuntimeConfigWriting {
+         subscriptionYAML: String?,
+         modeOverride: String?
+     ) throws -> RuntimeConfig {
+-        RuntimeConfig(
++        subscriptionYAMLCalls.append(subscriptionYAML)
++        return RuntimeConfig(
+             configURL: URL(fileURLWithPath: "/tmp/fake-config-\(version).yaml"),
+             workDirectory: URL(fileURLWithPath: "/tmp")
+         )
+diff --git a/mihomo-cli/Tests/mihomo-cliTests/RuntimeConfigWriterTests.swift b/mihomo-cli/Tests/mihomo-cliTests/RuntimeConfigWriterTests.swift
+new file mode 100644
+index 0000000..6eafc11
+--- /dev/null
++++ b/mihomo-cli/Tests/mihomo-cliTests/RuntimeConfigWriterTests.swift
+@@ -0,0 +1,175 @@
++import Foundation
++import XCTest
++import Yams
++@testable import mihomo_cli
++
++/// Regression coverage for the runtime config generation bug: a full
++/// mihomo config imported via `sub add local` that uses `proxy-providers`
++/// (and has no top-level `proxies` list) was getting reduced to an empty
++/// `proxies: []` / `proxy-groups: []` passthrough config, with
++/// `proxy-providers` dropped entirely and no traffic proxied.
++///
++/// The actual bug wasn't in `RuntimeConfigWriter` itself — its merge logic
++/// (load the whole YAML dict, overlay `mixed-port`/`external-controller`/
++/// `secret`/`mode`, re-dump the whole thing) already preserves arbitrary
++/// top-level keys like `proxy-providers` correctly. The bug was that the
++/// kernel-launch paths (`KernelUseService.launch`, `LifecycleService.
++/// performStart`) never loaded the active subscription's content at all —
++/// they always called the `subscriptionYAML: nil` convenience overload,
++/// which falls back to the hardcoded empty template unconditionally. See
++/// the matching tests in `KernelUseServiceTests` / `LifecycleServiceTests`
++/// for coverage of that half of the fix; this file covers the writer's own
++/// preservation behavior in isolation.
++final class RuntimeConfigWriterTests: XCTestCase {
++    private var tempDir: URL!
++    private var writer: RuntimeConfigWriter!
++
++    override func setUp() {
++        super.setUp()
++        tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
++        writer = RuntimeConfigWriter(runtimeDirectory: tempDir)
++    }
++
++    override func tearDown() {
++        try? FileManager.default.removeItem(at: tempDir)
++        super.tearDown()
++    }
++
++    private func readWrittenConfig(_ config: RuntimeConfig) throws -> [String: Any] {
++        let text = try String(contentsOf: config.configURL, encoding: .utf8)
++        guard let dict = try Yams.load(yaml: text) as? [String: Any] else {
++            XCTFail("written config.yaml did not parse back as a YAML mapping")
++            return [:]
++        }
++        return dict
++    }
++
++    func testProxyProvidersOnlyConfigIsPreservedNotReducedToEmptyNodeList() throws {
++        // Minimal repro from the bug report: a full config using
++        // proxy-providers, with no top-level `proxies` at all.
++        let subscriptionYAML = """
++        proxy-providers:
++          myprovider:
++            type: http
++            url: https://example.com/nodes.yaml
++            path: ./proxy-providers/myprovider.yaml
++            interval: 3600
++        proxy-groups:
++          - name: PROXY
++            type: select
++            use:
++              - myprovider
++        rules:
++          - MATCH,PROXY
++        """
++
++        let config = try writer.write(
++            version: "v1",
++            credentials: ControlAPICredentials(port: 9090, secret: "s3cr3t"),
++            mixedPort: 7890,
++            subscriptionYAML: subscriptionYAML,
++            modeOverride: nil
++        )
++
++        let written = try readWrittenConfig(config)
++
++        XCTAssertNotNil(written["proxy-providers"], "proxy-providers must survive into the runtime config")
++        let providers = written["proxy-providers"] as? [String: Any]
++        XCTAssertNotNil(providers?["myprovider"], "the specific provider entry must be preserved")
++
++        let groups = written["proxy-groups"] as? [[String: Any]]
++        XCTAssertEqual(groups?.count, 1, "the real proxy-group must be preserved, not overwritten with an empty list")
++        XCTAssertEqual(groups?.first?["name"] as? String, "PROXY")
++
++        let rules = written["rules"] as? [String]
++        XCTAssertEqual(rules, ["MATCH,PROXY"], "the subscription's real rules must be preserved, not the MATCH,DIRECT fallback")
++
++        // Injected runtime fields still take effect on top of the imported config.
++        XCTAssertEqual(written["mixed-port"] as? Int, 7890)
++        XCTAssertEqual(written["external-controller"] as? String, "127.0.0.1:9090")
++        XCTAssertEqual(written["secret"] as? String, "s3cr3t")
++    }
++
++    func testPlainProxiesListSubscriptionStillWorksAsBefore() throws {
++        let subscriptionYAML = """
++        proxies:
++          - name: node-1
++            type: ss
++            server: 1.2.3.4
++            port: 443
++            cipher: aes-256-gcm
++            password: hunter2
++        proxy-groups:
++          - name: PROXY
++            type: select
++            proxies:
++              - node-1
++        rules:
++          - MATCH,PROXY
++        """
++
++        let config = try writer.write(
++            version: "v1",
++            credentials: ControlAPICredentials(port: 9090, secret: "s3cr3t"),
++            mixedPort: 7890,
++            subscriptionYAML: subscriptionYAML,
++            modeOverride: nil
++        )
++
++        let written = try readWrittenConfig(config)
++        let proxies = written["proxies"] as? [[String: Any]]
++        XCTAssertEqual(proxies?.count, 1)
++        XCTAssertEqual(proxies?.first?["name"] as? String, "node-1")
++    }
++
++    func testNoSubscriptionFallsBackToEmptyPassthroughConfig() throws {
++        let config = try writer.write(
++            version: "v1",
++            credentials: ControlAPICredentials(port: 9090, secret: "s3cr3t"),
++            mixedPort: 7890,
++            subscriptionYAML: nil,
++            modeOverride: nil
++        )
++
++        let written = try readWrittenConfig(config)
++        XCTAssertEqual(written["proxies"] as? [Any], [])
++        XCTAssertEqual(written["proxy-groups"] as? [Any], [])
++        XCTAssertNil(written["proxy-providers"], "no subscription means no proxy-providers, not a fabricated one")
++    }
++
++    func testModeOverrideTakesPrecedenceOverEmbeddedMode() throws {
++        let subscriptionYAML = """
++        mode: global
++        proxies: []
++        """
++
++        let config = try writer.write(
++            version: "v1",
++            credentials: ControlAPICredentials(port: 9090, secret: "s3cr3t"),
++            mixedPort: 7890,
++            subscriptionYAML: subscriptionYAML,
++            modeOverride: "direct"
++        )
++
++        let written = try readWrittenConfig(config)
++        XCTAssertEqual(written["mode"] as? String, "direct")
++    }
++
++    func testEmbeddedModeUsedWhenNoOverrideGiven() throws {
++        let subscriptionYAML = """
++        mode: global
++        proxies: []
++        """
++
++        let config = try writer.write(
++            version: "v1",
++            credentials: ControlAPICredentials(port: 9090, secret: "s3cr3t"),
++            mixedPort: 7890,
++            subscriptionYAML: subscriptionYAML,
++            modeOverride: nil
++        )
++
++        let written = try readWrittenConfig(config)
++        XCTAssertEqual(written["mode"] as? String, "global")
++    }
++}
