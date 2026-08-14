@@ -5,6 +5,14 @@ final class LifecycleServiceTests: XCTestCase {
 
     private var tempDir: URL!
     private var dummyBinary: URL!
+    /// A real AppLogger, but pointed at this test's own temp directory —
+    /// never the real ~/.mihomo-cli/logs. Every LifecycleService below
+    /// must inject this explicitly; the class's default `logger:` param is
+    /// AppLogger.shared, the real singleton. Confirmed as a genuine bug on
+    /// real hardware: without this, every `swift test` run permanently
+    /// appends these tests' fixture data (fake PIDs, fake versions) into
+    /// the user's actual log file.
+    private var testLogger: AppLogger!
 
     override func setUp() {
         super.setUp()
@@ -12,6 +20,7 @@ final class LifecycleServiceTests: XCTestCase {
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         dummyBinary = tempDir.appendingPathComponent("mihomo")
         try? "binary-content".data(using: .utf8)?.write(to: dummyBinary)
+        testLogger = AppLogger(logsDirectory: tempDir.appendingPathComponent("logs"))
     }
 
     override func tearDown() {
@@ -22,6 +31,7 @@ final class LifecycleServiceTests: XCTestCase {
     func testStart_alreadyRunning_throwsExit2() async throws {
         let running = RunningKernelState(version: "1.19.10", pid: 4000, startedAt: Date(), controlPort: 9090, mixedPort: 7890, configPath: "", stdoutPath: "", stderrPath: "")
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { running }
         )
 
@@ -36,6 +46,7 @@ final class LifecycleServiceTests: XCTestCase {
 
     func testStart_noActiveKernel_throwsExit3() async throws {
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { nil },
             activeKernel: { nil }
         )
@@ -51,6 +62,7 @@ final class LifecycleServiceTests: XCTestCase {
     func testStart_missingBinary_throwsExit8() async throws {
         let record = KernelRecord(version: "1.19.10", binaryPath: "/nonexistent/path/mihomo", addedAt: Date(), isActive: true)
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { nil },
             activeKernel: { record }
         )
@@ -70,11 +82,14 @@ final class LifecycleServiceTests: XCTestCase {
         var printed: [String] = []
 
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { savedRunning },
             setRunningKernel: { savedRunning = $0 },
             activeKernel: { record },
             markKernelStartObserved: { startObserved = true },
+            regenerateCredentials: { port in ControlAPICredentials(port: port, secret: "test-secret") },
             clientFactory: { _ in FakeLifecycleKernelClient(result: .healthy) },
+            configWriter: FakeLifecycleConfigWriter(),
             processSpawner: { _, _, _, _, _ in 5555 },
             printLine: { printed.append($0) }
         )
@@ -85,12 +100,14 @@ final class LifecycleServiceTests: XCTestCase {
         XCTAssertEqual(savedRunning?.pid, 5555)
         XCTAssertEqual(savedRunning?.version, "1.19.10")
         XCTAssertFalse(savedRunning?.elevated ?? true, "plain 'start' must never launch elevated")
+        XCTAssertEqual(savedRunning?.configPath, "/tmp/fake-config-1.19.10.yaml", "regression guard: 'start' must actually write and use a real runtime config, not a path nothing ever wrote to")
         XCTAssertTrue(startObserved)
         XCTAssertTrue(printed.contains(where: { $0.contains("Started mihomo v1.19.10 (pid 5555)") }))
     }
 
     func testStop_notRunning_throwsExit2() async throws {
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { nil }
         )
 
@@ -110,6 +127,7 @@ final class LifecycleServiceTests: XCTestCase {
         var printed: [String] = []
 
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { running },
             setRunningKernel: { running = $0 },
             markKernelStopExpected: { stopExpected = true },
@@ -134,6 +152,7 @@ final class LifecycleServiceTests: XCTestCase {
         var elevatedFlags: [Bool] = []
 
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { running },
             setRunningKernel: { running = $0 },
             markKernelStopExpected: {},
@@ -151,6 +170,7 @@ final class LifecycleServiceTests: XCTestCase {
 
     func testSetTunElevation_noRunningKernel_throws() async throws {
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { nil }
         )
 
@@ -167,6 +187,7 @@ final class LifecycleServiceTests: XCTestCase {
         var spawnCount = 0
 
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { running },
             processSpawner: { _, _, _, _, _ in
                 spawnCount += 1
@@ -186,6 +207,7 @@ final class LifecycleServiceTests: XCTestCase {
         var spawnedElevated: [Bool] = []
 
         let service = LifecycleService(
+            logger: testLogger,
             runningKernel: { running },
             setRunningKernel: { running = $0 },
             activeKernel: { record },
@@ -193,7 +215,9 @@ final class LifecycleServiceTests: XCTestCase {
             markKernelStopExpected: {},
             markKernelStartObserved: {},
             controlAPICredentials: { ControlAPICredentials(port: 9090, secret: "s3cr3t") },
+            regenerateCredentials: { port in ControlAPICredentials(port: port, secret: "s3cr3t-2") },
             clientFactory: { _ in FakeLifecycleKernelClient(result: .healthy) },
+            configWriter: FakeLifecycleConfigWriter(),
             processSpawner: { _, _, _, _, elevated in
                 spawnedElevated.append(elevated)
                 return 4401
@@ -218,6 +242,26 @@ private final class FakeLifecycleTunPrivilege: TunPrivilegeManaging {
     init(onAcquire: @escaping () -> Void) { self.onAcquire = onAcquire }
     func hasEntitlement() -> Bool { false }
     func acquireEntitlement() throws { onAcquire() }
+}
+
+/// In-memory stand-in for RuntimeConfigWriter — critically, does NOT touch
+/// the real filesystem or ~/.mihomo-cli/runtime, so `start`/`restart`/
+/// `setTunElevation` tests stay isolated from the real environment now
+/// that performStart actually calls a config writer (previously it never
+/// did, which was itself the bug being fixed here).
+private final class FakeLifecycleConfigWriter: RuntimeConfigWriting {
+    func write(
+        version: String,
+        credentials: ControlAPICredentials,
+        mixedPort: Int,
+        subscriptionYAML: String?,
+        modeOverride: String?
+    ) throws -> RuntimeConfig {
+        RuntimeConfig(
+            configURL: URL(fileURLWithPath: "/tmp/fake-config-\(version).yaml"),
+            workDirectory: URL(fileURLWithPath: "/tmp")
+        )
+    }
 }
 
 private final class FakeLifecycleKernelClient: KernelClient {

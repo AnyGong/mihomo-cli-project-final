@@ -9,7 +9,27 @@ final class LifecycleService {
     private let markKernelStopExpected: () async throws -> Void
     private let markKernelStartObserved: () async throws -> Void
     private let controlAPICredentials: () async throws -> ControlAPICredentials?
+    /// Generates a fresh control-API secret bound to `port` and persists it
+    /// to metadata. Without this, `performStart` was reusing whatever
+    /// port/secret happened to already be in the metadata store (stale
+    /// from an unrelated prior `kernel use`) — the newly-spawned process
+    /// was never told to bind to that port/secret at all, since (see
+    /// `configWriter` below) no config file was ever written either.
+    private let regenerateCredentials: (Int) async throws -> ControlAPICredentials
     private let clientFactory: (ControlAPICredentials) -> KernelClient
+    /// Writes the actual runtime `config.yaml` the spawned kernel process
+    /// reads via `-f <path>`. This was the root cause of `start`/`restart`
+    /// failing every time: `performStart` computed a `configPath` under
+    /// `~/.mihomo-cli/run/config.yaml` but never created or wrote to it —
+    /// the kernel launched against a nonexistent (or stale, from some
+    /// unrelated earlier run) file, came up with defaults that didn't match
+    /// what the liveness check expected, and got killed. `kernel use`
+    /// (`KernelUseService`) always called this; `start`/`restart` never
+    /// did. Mirrors that working path exactly.
+    private let configWriter: RuntimeConfigWriting
+    private let controlPort: Int
+    private let mixedPort: Int
+    private let livenessTimeout: TimeInterval
     private let processSpawner: (_ binaryPath: String, _ configPath: String, _ stdoutPath: String, _ stderrPath: String, _ elevated: Bool) throws -> Int32
     /// Delivers a signal to `pid`. When `elevated` is true (i.e. the target
     /// process was launched via `sudo` for Tun mode), the signal must also
@@ -40,7 +60,12 @@ final class LifecycleService {
         markKernelStopExpected: @escaping () async throws -> Void = { try await MetadataStore.shared.markKernelStopExpected() },
         markKernelStartObserved: @escaping () async throws -> Void = { try await MetadataStore.shared.markKernelStartObserved() },
         controlAPICredentials: @escaping () async throws -> ControlAPICredentials? = { try await MetadataStore.shared.controlAPICredentials() },
+        regenerateCredentials: @escaping (Int) async throws -> ControlAPICredentials = { try MetadataStore.shared.regenerateControlAPICredentials(port: $0) },
         clientFactory: @escaping (ControlAPICredentials) -> KernelClient = { HTTPKernelClient(port: $0.port, secret: $0.secret) },
+        configWriter: RuntimeConfigWriting = RuntimeConfigWriter(),
+        controlPort: Int = 9090,
+        mixedPort: Int = 7890,
+        livenessTimeout: TimeInterval = 5,
         processSpawner: @escaping (_ binaryPath: String, _ configPath: String, _ stdoutPath: String, _ stderrPath: String, _ elevated: Bool) throws -> Int32 = { binaryPath, configPath, stdoutPath, stderrPath, elevated in
             let process = Process()
             if elevated {
@@ -102,7 +127,12 @@ final class LifecycleService {
         self.markKernelStopExpected = markKernelStopExpected
         self.markKernelStartObserved = markKernelStartObserved
         self.controlAPICredentials = controlAPICredentials
+        self.regenerateCredentials = regenerateCredentials
         self.clientFactory = clientFactory
+        self.configWriter = configWriter
+        self.controlPort = controlPort
+        self.mixedPort = mixedPort
+        self.livenessTimeout = livenessTimeout
         self.processSpawner = processSpawner
         self.processKiller = processKiller
         self.isProcessRunning = isProcessRunning
@@ -173,18 +203,25 @@ final class LifecycleService {
             )
         }
 
+        // Actually generate the runtime config the kernel will read via
+        // "-f <path>" — see the configWriter/regenerateCredentials doc
+        // comments above for why this step was missing entirely before.
+        let selectedCredentials = try await regenerateCredentials(controlPort)
+        let runtimeConfig = try configWriter.write(version: targetKernel.version, credentials: selectedCredentials, mixedPort: mixedPort)
+
         let runDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".mihomo-cli/run")
         try? FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
-        let configPath = runDir.appendingPathComponent("config.yaml").path
         let stdoutPath = runDir.appendingPathComponent("mihomo.stdout.log").path
         let stderrPath = runDir.appendingPathComponent("mihomo.stderr.log").path
 
-        let pid = try processSpawner(targetKernel.binaryPath, configPath, stdoutPath, stderrPath, elevated)
+        let pid = try processSpawner(targetKernel.binaryPath, runtimeConfig.configURL.path, stdoutPath, stderrPath, elevated)
 
-        let creds = try await controlAPICredentials() ?? ControlAPICredentials(port: 9090, secret: "")
-        let client = clientFactory(creds)
+        let client = clientFactory(selectedCredentials)
 
-        let liveness = try await client.livenessCheck(expectedVersion: targetKernel.version, expectedConfigPatch: nil)
+        // Poll rather than check once — the kernel needs a moment to bind
+        // its control API after being spawned; a single immediate check
+        // was racy even with the config bug above fixed.
+        let liveness = try await waitForLiveness(client: client, expectedVersion: targetKernel.version)
         switch liveness {
         case .healthy:
             break
@@ -216,9 +253,9 @@ final class LifecycleService {
             version: targetKernel.version,
             pid: pid,
             startedAt: now(),
-            controlPort: creds.port,
-            mixedPort: 7890,
-            configPath: configPath,
+            controlPort: selectedCredentials.port,
+            mixedPort: mixedPort,
+            configPath: runtimeConfig.configURL.path,
             stdoutPath: stdoutPath,
             stderrPath: stderrPath,
             elevated: elevated
@@ -340,5 +377,26 @@ final class LifecycleService {
                 throw error
             }
         }
+    }
+
+    /// Polls the control API instead of checking once — mirrors
+    /// `KernelUseService.waitForLiveness`, which this port intentionally
+    /// matches so both launch paths behave the same way. The kernel needs
+    /// a brief moment after being spawned to bind its control API; a
+    /// single immediate check is racy regardless of whether the config
+    /// file it was given is correct.
+    private func waitForLiveness(client: KernelClient, expectedVersion: String) async throws -> LivenessResult {
+        let deadline = Date().addingTimeInterval(livenessTimeout)
+        var lastResult = try await client.livenessCheck(expectedVersion: expectedVersion, expectedConfigPatch: nil)
+        while Date() < deadline {
+            switch lastResult {
+            case .healthy, .versionMismatch, .configMismatch:
+                return lastResult
+            case .unresponsive:
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                lastResult = try await client.livenessCheck(expectedVersion: expectedVersion, expectedConfigPatch: nil)
+            }
+        }
+        return lastResult
     }
 }
