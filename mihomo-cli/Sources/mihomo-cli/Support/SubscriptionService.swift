@@ -572,36 +572,15 @@ final class SubscriptionService {
     // MARK: - Private Helpers
 
     private func loadContent(for record: SubscriptionRecord) throws -> String {
-        let path: String
-        switch record.source {
-        case .local(let p):
-            path = p
-        case .remote:
-            path = destinationURL(for: record.name).path
-        }
-
-        guard fileManager.fileExists(atPath: path) else {
-            throw CLIError(
-                what: "subscription file not found",
-                cause: "file at '\(path)' does not exist",
-                exitCode: .notFound
-            )
-        }
-
-        do {
-            return try String(contentsOfFile: path, encoding: .utf8)
-        } catch {
-            throw CLIError(
-                what: "could not read subscription file",
-                cause: error.localizedDescription,
-                exitCode: .permissionDenied
-            )
-        }
+        try SubscriptionContentLoader.loadContent(
+            for: record,
+            subscriptionsDirectory: subscriptionsDirectory,
+            fileManager: fileManager
+        )
     }
 
     private func destinationURL(for name: String) -> URL {
-        let safeName = name.replacingOccurrences(of: "/", with: "_")
-        return subscriptionsDirectory.appendingPathComponent("\(safeName).yaml")
+        SubscriptionContentLoader.destinationURL(for: name, in: subscriptionsDirectory)
     }
 
     private func ensureSubscriptionsDirectoryExists() throws {

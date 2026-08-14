@@ -33,7 +33,14 @@ let package = Package(
         ),
         .testTarget(
             name: "mihomo-cliTests",
-            dependencies: ["mihomo-cli"],
+            dependencies: [
+                "mihomo-cli",
+                // Needed so tests can parse written config.yaml output back
+                // into a dictionary to assert on it directly (see
+                // RuntimeConfigWriterTests) rather than string-matching —
+                // previously only the executable target could `import Yams`.
+                .product(name: "Yams", package: "Yams"),
+            ],
             path: "Tests/mihomo-cliTests",
             resources: [
                 .copy("Fixtures")

@@ -16,6 +16,14 @@ final class LifecycleService {
     /// was never told to bind to that port/secret at all, since (see
     /// `configWriter` below) no config file was ever written either.
     private let regenerateCredentials: (Int) async throws -> ControlAPICredentials
+    /// Loads the currently active subscription's raw YAML (nil if none is
+    /// active). `performStart` previously never called this at all — every
+    /// `start`/`restart`/Tun-elevation relaunch wrote the hardcoded empty
+    /// passthrough config regardless of what subscription was active,
+    /// silently dropping `proxy-providers`, `proxy-groups`, custom `rules`,
+    /// etc. See `SubscriptionContentLoader` and the mirrored fix in
+    /// `KernelUseService`.
+    private let activeSubscriptionContent: () async throws -> String?
     private let clientFactory: (ControlAPICredentials) -> KernelClient
     /// Writes the actual runtime `config.yaml` the spawned kernel process
     /// reads via `-f <path>`. This was the root cause of `start`/`restart`
@@ -61,6 +69,13 @@ final class LifecycleService {
         markKernelStartObserved: @escaping () async throws -> Void = { try await MetadataStore.shared.markKernelStartObserved() },
         controlAPICredentials: @escaping () async throws -> ControlAPICredentials? = { try await MetadataStore.shared.controlAPICredentials() },
         regenerateCredentials: @escaping (Int) async throws -> ControlAPICredentials = { try MetadataStore.shared.regenerateControlAPICredentials(port: $0) },
+        activeSubscriptionContent: @escaping () async throws -> String? = {
+            guard let sub = try await MetadataStore.shared.activeSubscription() else { return nil }
+            return try SubscriptionContentLoader.loadContent(
+                for: sub,
+                subscriptionsDirectory: URL(fileURLWithPath: "\(NSHomeDirectory())/.mihomo-cli/subscriptions")
+            )
+        },
         clientFactory: @escaping (ControlAPICredentials) -> KernelClient = { HTTPKernelClient(port: $0.port, secret: $0.secret) },
         configWriter: RuntimeConfigWriting = RuntimeConfigWriter(),
         controlPort: Int = 9090,
@@ -128,6 +143,7 @@ final class LifecycleService {
         self.markKernelStartObserved = markKernelStartObserved
         self.controlAPICredentials = controlAPICredentials
         self.regenerateCredentials = regenerateCredentials
+        self.activeSubscriptionContent = activeSubscriptionContent
         self.clientFactory = clientFactory
         self.configWriter = configWriter
         self.controlPort = controlPort
@@ -207,7 +223,14 @@ final class LifecycleService {
         // "-f <path>" — see the configWriter/regenerateCredentials doc
         // comments above for why this step was missing entirely before.
         let selectedCredentials = try await regenerateCredentials(controlPort)
-        let runtimeConfig = try configWriter.write(version: targetKernel.version, credentials: selectedCredentials, mixedPort: mixedPort)
+        let subscriptionYAML = try await activeSubscriptionContent()
+        let runtimeConfig = try configWriter.write(
+            version: targetKernel.version,
+            credentials: selectedCredentials,
+            mixedPort: mixedPort,
+            subscriptionYAML: subscriptionYAML,
+            modeOverride: nil
+        )
 
         let runDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".mihomo-cli/run")
         try? FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)

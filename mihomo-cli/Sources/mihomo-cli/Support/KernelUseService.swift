@@ -24,6 +24,13 @@ final class KernelUseService {
     private let regenerateCredentials: (Int) async throws -> ControlAPICredentials
     private let markStopExpected: () async throws -> Void
     private let markStartObserved: () async throws -> Void
+    /// Loads the currently active subscription's raw YAML (nil if none is
+    /// active) so it actually reaches the runtime config the kernel is
+    /// launched with — previously `launch()` never called this at all,
+    /// always writing the hardcoded empty passthrough config regardless of
+    /// what subscription was active (silently dropping `proxy-providers`,
+    /// `proxy-groups`, custom `rules`, etc.). See `SubscriptionContentLoader`.
+    private let activeSubscriptionContent: () async throws -> String?
     private let configWriter: RuntimeConfigWriting
     private let processController: KernelProcessControlling
     private let portChecker: PortChecking
@@ -43,6 +50,13 @@ final class KernelUseService {
         regenerateCredentials: @escaping (Int) async throws -> ControlAPICredentials = { try MetadataStore.shared.regenerateControlAPICredentials(port: $0) },
         markStopExpected: @escaping () async throws -> Void = { try MetadataStore.shared.markKernelStopExpected() },
         markStartObserved: @escaping () async throws -> Void = { try MetadataStore.shared.markKernelStartObserved() },
+        activeSubscriptionContent: @escaping () async throws -> String? = {
+            guard let sub = try await MetadataStore.shared.activeSubscription() else { return nil }
+            return try SubscriptionContentLoader.loadContent(
+                for: sub,
+                subscriptionsDirectory: URL(fileURLWithPath: "\(NSHomeDirectory())/.mihomo-cli/subscriptions")
+            )
+        },
         configWriter: RuntimeConfigWriting = RuntimeConfigWriter(),
         processController: KernelProcessControlling = ProcessController(),
         portChecker: PortChecking = LoopbackPortChecker(),
@@ -61,6 +75,7 @@ final class KernelUseService {
         self.regenerateCredentials = regenerateCredentials
         self.markStopExpected = markStopExpected
         self.markStartObserved = markStartObserved
+        self.activeSubscriptionContent = activeSubscriptionContent
         self.configWriter = configWriter
         self.processController = processController
         self.portChecker = portChecker
@@ -122,7 +137,14 @@ final class KernelUseService {
     private func launch(record: KernelRecord, replacing previousRunning: RunningKernelState?) async throws -> KernelLaunchContext {
         let selectedControlPort = try await preparePortsAndStopPrevious(previousRunning)
         let credentials = try await regenerateCredentials(selectedControlPort)
-        let runtimeConfig = try configWriter.write(version: record.version, credentials: credentials, mixedPort: mixedPort)
+        let subscriptionYAML = try await activeSubscriptionContent()
+        let runtimeConfig = try configWriter.write(
+            version: record.version,
+            credentials: credentials,
+            mixedPort: mixedPort,
+            subscriptionYAML: subscriptionYAML,
+            modeOverride: nil
+        )
         let stdoutURL = logDirectory.appendingPathComponent("kernel-\(record.version)-stdout.log")
         let stderrURL = logDirectory.appendingPathComponent("kernel-\(record.version)-stderr.log")
         let launched = try processController.start(KernelLaunchRequest(

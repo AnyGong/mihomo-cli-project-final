@@ -105,6 +105,34 @@ final class LifecycleServiceTests: XCTestCase {
         XCTAssertTrue(printed.contains(where: { $0.contains("Started mihomo v1.19.10 (pid 5555)") }))
     }
 
+    func testStart_loadsActiveSubscriptionContentIntoRuntimeConfig() async throws {
+        // Regression test: `performStart` previously never called
+        // `activeSubscriptionContent` at all, so `start`/`restart` always
+        // wrote the runtime config with `subscriptionYAML: nil` regardless
+        // of what subscription was active — silently dropping
+        // proxy-providers, proxy-groups, and rules from the real file.
+        let record = KernelRecord(version: "1.19.10", binaryPath: dummyBinary.path, addedAt: Date(), isActive: true)
+        let subscriptionYAML = "proxy-providers:\n  p1:\n    type: http\n    url: https://example.com\n"
+        let writer = FakeLifecycleConfigWriter()
+
+        let service = LifecycleService(
+            logger: testLogger,
+            runningKernel: { nil },
+            setRunningKernel: { _ in },
+            activeKernel: { record },
+            markKernelStartObserved: {},
+            regenerateCredentials: { port in ControlAPICredentials(port: port, secret: "test-secret") },
+            activeSubscriptionContent: { subscriptionYAML },
+            clientFactory: { _ in FakeLifecycleKernelClient(result: .healthy) },
+            configWriter: writer,
+            processSpawner: { _, _, _, _, _ in 5555 }
+        )
+
+        try await service.start(version: nil)
+
+        XCTAssertEqual(writer.subscriptionYAMLCalls, [subscriptionYAML])
+    }
+
     func testStop_notRunning_throwsExit2() async throws {
         let service = LifecycleService(
             runningKernel: { nil },
@@ -250,6 +278,11 @@ private final class FakeLifecycleTunPrivilege: TunPrivilegeManaging {
 /// that performStart actually calls a config writer (previously it never
 /// did, which was itself the bug being fixed here).
 private final class FakeLifecycleConfigWriter: RuntimeConfigWriting {
+    /// Every `subscriptionYAML` this writer was called with, in order —
+    /// regression guard for the bug where `performStart` never loaded the
+    /// active subscription at all and always passed `nil`.
+    private(set) var subscriptionYAMLCalls: [String?] = []
+
     func write(
         version: String,
         credentials: ControlAPICredentials,
@@ -257,7 +290,8 @@ private final class FakeLifecycleConfigWriter: RuntimeConfigWriting {
         subscriptionYAML: String?,
         modeOverride: String?
     ) throws -> RuntimeConfig {
-        RuntimeConfig(
+        subscriptionYAMLCalls.append(subscriptionYAML)
+        return RuntimeConfig(
             configURL: URL(fileURLWithPath: "/tmp/fake-config-\(version).yaml"),
             workDirectory: URL(fileURLWithPath: "/tmp")
         )

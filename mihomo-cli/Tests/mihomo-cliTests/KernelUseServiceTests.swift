@@ -65,6 +65,50 @@ final class KernelUseServiceTests: XCTestCase {
         XCTAssertEqual(marker.count, 1)
     }
 
+    func testLaunchLoadsActiveSubscriptionContentIntoRuntimeConfig() async throws {
+        // Regression test: `launch()` previously never called
+        // `activeSubscriptionContent` at all, so the runtime config was
+        // always written with `subscriptionYAML: nil` regardless of what
+        // subscription was active — silently dropping proxy-providers,
+        // proxy-groups, and rules from the real subscription file.
+        let process = FakeProcessController()
+        let writer = FakeConfigWriter(configURL: tempDir.appendingPathComponent("config.yaml"), workDirectory: tempDir)
+        let target = try makeKernel(version: "v2")
+        let subscriptionYAML = "proxy-providers:\n  p1:\n    type: http\n    url: https://example.com\n"
+
+        let service = makeService(
+            target: target,
+            activeResponses: [nil, nil],
+            writer: writer,
+            process: process,
+            activeSubscriptionContent: { subscriptionYAML },
+            clientFactory: { _ in FakeKernelClient(result: .healthy) }
+        )
+
+        _ = try await service.use(version: "v2")
+
+        XCTAssertEqual(writer.subscriptionYAMLCalls, [subscriptionYAML])
+    }
+
+    func testLaunchWithNoActiveSubscriptionPassesNil() async throws {
+        let process = FakeProcessController()
+        let writer = FakeConfigWriter(configURL: tempDir.appendingPathComponent("config.yaml"), workDirectory: tempDir)
+        let target = try makeKernel(version: "v2")
+
+        let service = makeService(
+            target: target,
+            activeResponses: [nil, nil],
+            writer: writer,
+            process: process,
+            activeSubscriptionContent: { nil },
+            clientFactory: { _ in FakeKernelClient(result: .healthy) }
+        )
+
+        _ = try await service.use(version: "v2")
+
+        XCTAssertEqual(writer.subscriptionYAMLCalls, [nil])
+    }
+
     func testPreviousRunningKernelIsMarkedExpectedStoppedAndPortsWaitedBeforeStart() async throws {
         let process = FakeProcessController(runningPIDs: [11])
         let ports = FakePortChecker()
@@ -149,6 +193,7 @@ final class KernelUseServiceTests: XCTestCase {
         ports: FakePortChecker = FakePortChecker(),
         markStopExpected: @escaping () async throws -> Void = {},
         markStartObserved: @escaping () async throws -> Void = {},
+        activeSubscriptionContent: @escaping () async throws -> String? = { nil },
         clientFactory: @escaping (ControlAPICredentials) -> KernelClient = { _ in FakeKernelClient(result: .healthy) }
     ) -> KernelUseService {
         let active = ActiveKernelBox(activeResponses)
@@ -174,6 +219,7 @@ final class KernelUseServiceTests: XCTestCase {
             },
             markStopExpected: markStopExpected,
             markStartObserved: markStartObserved,
+            activeSubscriptionContent: activeSubscriptionContent,
             configWriter: writer ?? FakeConfigWriter(configURL: tempDir.appendingPathComponent("config.yaml"), workDirectory: tempDir),
             processController: process,
             portChecker: ports,
@@ -224,6 +270,10 @@ private final class FakeConfigWriter: RuntimeConfigWriting {
     let configURL: URL
     let workDirectory: URL
     private(set) var credentials: ControlAPICredentials?
+    /// Every `subscriptionYAML` this writer was called with, in order —
+    /// regression guard for the bug where `launch()` never loaded the
+    /// active subscription at all and always passed `nil`.
+    private(set) var subscriptionYAMLCalls: [String?] = []
 
     init(configURL: URL, workDirectory: URL) {
         self.configURL = configURL
@@ -238,6 +288,7 @@ private final class FakeConfigWriter: RuntimeConfigWriting {
         modeOverride: String? = nil
     ) throws -> RuntimeConfig {
         self.credentials = credentials
+        subscriptionYAMLCalls.append(subscriptionYAML)
         return RuntimeConfig(configURL: configURL, workDirectory: workDirectory)
     }
 }
