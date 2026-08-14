@@ -25,9 +25,9 @@ index a19c58e..1cc154f 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
 @@ -442,3 +442,15 @@ Layer 7 (`daemon` command group, manual lifecycle `start`/`stop`/`restart`, `log
-
-
-
+ 
+ 
+ 
 +
 +## 27. Bugfix — `net tun on` false-positive utun collision on real hardware
 +
@@ -59,7 +59,7 @@ index 40dc9ec..8fc3ed0 100644
 +++ b/mihomo-cli/Sources/mihomo-cli/Support/PortInspector.swift
 @@ -35,9 +35,16 @@ final class PortInspector: PortInspecting {
      }
-
+ 
      func isUtunInterfacePresent() -> Bool {
 +        // `ifconfig -l` only lists interface *names*, and macOS pre-allocates
 +        // several idle utun slots at boot for its own frameworks (Continuity,
@@ -72,18 +72,18 @@ index 40dc9ec..8fc3ed0 100644
          process.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
 -        process.arguments = ["-l"]
 +        process.arguments = ["-a"]
-
+ 
          let pipe = Pipe()
          process.standardOutput = pipe
 @@ -52,8 +59,7 @@ final class PortInspector: PortInspecting {
-
+ 
          let data = pipe.fileHandleForReading.readDataToEndOfFile()
          let output = String(data: data, encoding: .utf8) ?? ""
 -        let interfaces = output.components(separatedBy: .whitespacesAndNewlines)
 -        return interfaces.contains(where: { $0.lowercased().hasPrefix("utun") })
 +        return PortInspector.hasActiveUtunTunnel(ifconfigOutput: output)
      }
-
+ 
      // MARK: - Parsing Helpers (Static & Testable)
 @@ -73,4 +79,68 @@ final class PortInspector: PortInspecting {
          }
